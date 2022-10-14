@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use anyhow::bail;
+
 use crate::onnx::tensor_shape_proto;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,22 +65,49 @@ impl Shape {
         }
     }
 
-    fn is_concrete(&self) -> bool {
-        self.dims.iter().all(|d| match d {
-            Dimension::Concrete(_) => true,
-            _ => false,
-        })
+    pub(crate) fn is_concrete(&self) -> bool {
+        self.dims
+            .iter()
+            .all(|d| matches!(d, Dimension::Concrete(_)))
     }
 
     pub(crate) fn size(&self, dim: isize) -> &Dimension {
         &self.dims[self.reldim(dim)]
     }
 
+    // TODO: Store constants as Vec<i64> not shapes.
+    pub(crate) fn as_int(&self, dim: isize) -> anyhow::Result<i64> {
+        match self.dims[self.reldim(dim)] {
+            Dimension::Concrete(d) => Ok(d as i64),
+            Dimension::Map => Ok(0),
+            Dimension::Rest => Ok(-1),
+            _ => Err(anyhow::anyhow!(
+                "dimension {} is not concrete for shape {self}",
+                self.reldim(dim)
+            )),
+        }
+    }
+
+    pub(crate) fn concrete_size(&self, dim: isize) -> anyhow::Result<usize> {
+        match self.dims[self.reldim(dim)] {
+            Dimension::Concrete(d) => Ok(d),
+            _ => Err(anyhow::anyhow!(
+                "dimension {} is not concrete for shape {self}",
+                self.reldim(dim)
+            )),
+        }
+    }
+
+    pub(crate) fn set_dim(&mut self, dim: isize, val: Dimension) {
+        let index = self.reldim(dim);
+        self.dims[index] = val;
+    }
+
     pub(crate) fn ndims(&self) -> usize {
         self.dims.len()
     }
 
-    fn numel(&self) -> Option<usize> {
+    pub(crate) fn numel(&self) -> Option<usize> {
         let mut s = 1;
         for d in &self.dims {
             match d {
@@ -103,7 +132,7 @@ impl Shape {
             })
             .collect();
 
-        match (
+        if let (Some(other_prod), true) = (
             other.numel(),
             dims.iter()
                 .all(|dim| !matches!(dim, Dimension::Symbolic(_) | Dimension::Map))
@@ -113,41 +142,36 @@ impl Shape {
                     .count()
                     == 1,
         ) {
-            (Some(other_prod), true) => {
-                let self_prod: usize = dims
-                    .iter()
-                    .map(|dim| match dim {
-                        Dimension::Concrete(i) => *i,
-                        _ => 1,
-                    })
-                    .product();
-                for dim in dims.iter_mut() {
-                    if let Dimension::Rest = dim {
-                        *dim = Dimension::Concrete(other_prod / self_prod);
-                    }
+            let self_prod: usize = dims
+                .iter()
+                .map(|dim| match dim {
+                    Dimension::Concrete(i) => *i,
+                    _ => 1,
+                })
+                .product();
+            for dim in dims.iter_mut() {
+                if let Dimension::Rest = dim {
+                    *dim = Dimension::Concrete(other_prod / self_prod);
+                    break;
                 }
             }
-            _ => {}
         }
 
         Self { dims }
     }
 
     pub(crate) fn squeeze(&mut self) {
-        self.dims.retain(|d| match d {
-            Dimension::Concrete(1) => false,
-            _ => true,
-        })
+        self.dims.retain(|d| !matches!(d, Dimension::Concrete(1)))
     }
 
     pub(crate) fn unsqueeze(&mut self, dim: usize) {
         self.dims.insert(dim, Dimension::Concrete(1))
     }
 
-    pub(crate) fn transpose(&self, dim1: isize, dim2: isize) -> Self {
-        let mut dims = self.dims.clone();
-        dims.swap(self.reldim(dim1), self.reldim(dim2));
-        Self { dims }
+    pub(crate) fn transpose(&mut self, dim1: isize, dim2: isize) {
+        let dim1 = self.reldim(dim1);
+        let dim2 = self.reldim(dim2);
+        self.dims.swap(dim1, dim2);
     }
 
     pub(crate) fn is_scalar(&self) -> bool {
@@ -156,6 +180,47 @@ impl Shape {
 
     pub(crate) fn append_dim(&mut self, dim: Dimension) {
         self.dims.push(dim);
+    }
+
+    pub(crate) fn pad_left_to(&mut self, n: usize) {
+        while self.ndims() != n {
+            self.unsqueeze(0);
+        }
+    }
+
+    pub(crate) fn permute(&mut self, perm: &[i64]) {
+        self.dims = perm
+            .iter()
+            .map(|i| self.dims[*i as usize].clone())
+            .collect();
+    }
+
+    pub(crate) fn broadcast(&mut self, a: &Shape) -> anyhow::Result<()> {
+        for (bdim, adim) in self.dims.iter_mut().zip(&a.dims) {
+            let new_val = match (&bdim, adim) {
+                (Dimension::Concrete(1), Dimension::Concrete(a)) => Some(Dimension::Concrete(*a)),
+                (_, Dimension::Concrete(1)) => None,
+                _ if bdim != adim => {
+                    anyhow::bail!("invalid broadcast between {self} and {a}");
+                }
+                _ => None,
+            };
+            if let Some(val) = new_val {
+                *bdim = val;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn scale(&mut self, scales: &[f32]) -> anyhow::Result<()> {
+        for (dim, s) in self.dims.iter_mut().zip(scales) {
+            if let Dimension::Concrete(val) = dim {
+                *dim = Dimension::Concrete((*s * *val as f32) as usize);
+            } else if *s != 1. {
+                bail!("unsupported scaling {} on dimension {:?}", s, &dim);
+            }
+        }
+        Ok(())
     }
 }
 
