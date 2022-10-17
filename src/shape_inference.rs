@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail};
 
 use crate::onnx;
 use crate::shape::Shape;
+use crate::utils::*;
 
 pub(crate) struct ShapeInferer<'a> {
     shapes: HashMap<&'a str, Shape>,
@@ -126,6 +127,15 @@ impl<'a> ShapeInferer<'a> {
                 };
 
                 vec![out_shape]
+            }
+            "Expand" => {
+                let mut out = self.shapes[node.input[0].as_str()].clone();
+                let shape = self
+                    .find_stored_shape(&node.input[1])
+                    .ok_or_else(|| anyhow!("failed to find shape {}", node.input[1]))?;
+
+                out.broadcast(&shape)?;
+                vec![out]
             }
             "Transpose" => {
                 let perm = get_attr_ints(node, "perm")
@@ -286,6 +296,17 @@ impl<'a> ShapeInferer<'a> {
 
                 vec![out_shape]
             }
+            "ConstantOfShape" => {
+                let output_shape =
+                    self.find_stored_shape(node.input[0].as_str())
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "failed to find shape {} for ConstantOfShapea",
+                                node.input[0]
+                            )
+                        })?;
+                vec![output_shape]
+            }
             "Constant" => {
                 let mut shape = None;
                 for attr in &node.attribute {
@@ -325,6 +346,23 @@ impl<'a> ShapeInferer<'a> {
             }
             "InstanceNormalization" | "Cast" | "Relu" | "Sigmoid" | "Softmax" | "Tanh" => {
                 vec![self.shapes[node.input[0].as_str()].clone()]
+            }
+            "Where" => {
+                let a = &self.shapes[node.input[0].as_str()];
+                let b = &self.shapes[node.input[1].as_str()];
+                let c = &self.shapes[node.input[2].as_str()];
+                if a != b {
+                    bail!("invalid Where({}, {}, {})", a, b, c);
+                }
+                vec![a.clone()]
+            }
+            "Equal" => {
+                let a = &self.shapes[node.input[0].as_str()];
+                let b = &self.shapes[node.input[1].as_str()];
+                if a != b {
+                    bail!("invalid Equal {} == {}", a, b);
+                }
+                vec![a.clone()]
             }
             "Identity" => {
                 let input_shape = self.shapes[node.input[0].as_str()].clone();
@@ -378,48 +416,5 @@ impl<'a> ShapeInferer<'a> {
 
     pub(crate) fn init(&mut self, node: &'a str, shape: Shape) {
         self.shapes.insert(node, shape);
-    }
-}
-
-fn get_attr_int(node: &onnx::NodeProto, name: &str) -> Option<i64> {
-    node.attribute
-        .iter()
-        .find_map(|attr| if attr.name() == name { attr.i } else { None })
-}
-
-fn get_attr_ints<'a>(node: &'a onnx::NodeProto, name: &str) -> Option<&'a [i64]> {
-    node.attribute.iter().find_map(|attr| {
-        if attr.name() == name {
-            Some(attr.ints.as_ref())
-        } else {
-            None
-        }
-    })
-}
-
-// There is sometimes an issue where the data is not actually in the
-// tensor.T_data field so we use raw_data instead.
-fn int_slice_from_tensor(tensor: &onnx::TensorProto) -> &[i64] {
-    if !tensor.int64_data.is_empty() {
-        &tensor.int64_data
-    } else {
-        let raw_data = tensor.raw_data();
-        let slice = unsafe {
-            let ptr = raw_data.as_ptr() as *const i64;
-            std::slice::from_raw_parts(ptr, raw_data.len() / std::mem::size_of::<i64>())
-        };
-        slice
-    }
-}
-
-fn float_slice_from_tensor(tensor: &onnx::TensorProto) -> &[f32] {
-    if !tensor.float_data.is_empty() {
-        &tensor.float_data
-    } else {
-        let raw_data = tensor.raw_data();
-        unsafe {
-            let ptr = raw_data.as_ptr() as *const f32;
-            std::slice::from_raw_parts(ptr, raw_data.len() / std::mem::size_of::<f32>())
-        }
     }
 }

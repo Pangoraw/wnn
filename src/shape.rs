@@ -32,6 +32,29 @@ impl Shape {
         }
     }
 
+    pub(crate) fn from_tensor_shape_with_maps(
+        proto: &crate::onnx::TensorShapeProto,
+        map: &std::collections::HashMap<&str, Dimension>,
+    ) -> Self {
+        let dims = proto
+            .dim
+            .iter()
+            .map(|dim| match &dim.value {
+                Some(tensor_shape_proto::dimension::Value::DimValue(i)) => {
+                    Dimension::Concrete(*i as _)
+                }
+                Some(tensor_shape_proto::dimension::Value::DimParam(content)) => {
+                    match map.get(content.as_str()) {
+                        Some(dim) => dim.clone(),
+                        None => Dimension::Symbolic(content.clone()),
+                    }
+                }
+                None => unreachable!("dimension = None"),
+            })
+            .collect();
+        Self { dims }
+    }
+
     pub(crate) fn from_tensor_shape(proto: &crate::onnx::TensorShapeProto) -> Self {
         let dims = proto
             .dim
@@ -198,7 +221,7 @@ impl Shape {
     pub(crate) fn broadcast(&mut self, a: &Shape) -> anyhow::Result<()> {
         for (bdim, adim) in self.dims.iter_mut().zip(&a.dims) {
             let new_val = match (&bdim, adim) {
-                (Dimension::Concrete(1), Dimension::Concrete(a)) => Some(Dimension::Concrete(*a)),
+                (Dimension::Concrete(1), _) => Some(adim.clone()),
                 (_, Dimension::Concrete(1)) => None,
                 _ if bdim != adim => {
                     anyhow::bail!("invalid broadcast between {self} and {a}");
