@@ -7,15 +7,15 @@ var<storage, read> input_right: array<f32>;
 @group(0) @binding(2)
 var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(1, 1, 1)
+@compute @workgroup_size(1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let y = global_id.y;
     let x = global_id.x;
+    let y = global_id.y;
 
-    var tmpsum = 0.;
-    for (var k: u32 = 0u; k < 1000u; k = k + 1u) {
-        tmpsum = tmpsum + input_left[k] * input_right[y + k * 2u];
+    var tmpsum = 0.0;
+    for (var k: u32 = 0u; k < 10u; k = k + 1u) {
+        tmpsum = tmpsum + input_left[k + y * 10u] * input_right[x + k * 20u];
     }
 
-    output[x * 2u + y] = tmpsum;
+    output[x + y * 20u] = tmpsum;
 }

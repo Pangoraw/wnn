@@ -17,13 +17,14 @@ mod type_inference;
 mod utils;
 
 fn main() -> anyhow::Result<()> {
-    let filename = "./simple_model.onnx";
+    // let filename = "./simple_model.onnx";
     // let filename = "vae_decoder_sim.onnx";
     // let filename = "unet.onnx";
-    // let filename = "./model.onnx";
+    let filename = "./model.onnx";
     // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_pytorch_1_1.onnx";
     // let filename = "/home/pberg/Projects/ONNX.jl/model.onnx";
     // let filename = "/home/pberg/Projects/ONNX.jl/model_sim.onnx";
+    // let filename = "unet_sim2.onnx";
 
     let mut onnx_file = std::fs::OpenOptions::new()
         .read(true)
@@ -244,15 +245,12 @@ fn main() -> anyhow::Result<()> {
         println!(
             "allocating {} {}",
             pretty,
-            human_bytes::human_bytes(total_alloc_size as f64)
+            human_bytes::human_bytes(total_alloc_size as f64),
         );
-        let floats = [1., 1.];
-        let data = unsafe {
-            let ptr = floats.as_ptr() as *const u8;
-            std::slice::from_raw_parts(ptr, 2 * 4)
-        };
-
-        runner.add_node_with_init(input.name(), desc, data)?;
+        let floats: Vec<f32> = std::iter::repeat(1.0)
+            .take(shape.numel().unwrap())
+            .collect();
+        runner.add_node_with_init(input.name(), desc, bytemuck::cast_slice(&floats))?;
         if total_alloc_size > max_alloc_size {
             anyhow::bail!(
                 "stopping at node {} when allocating {}",
@@ -262,19 +260,25 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let node = &graph.node[0];
-    let op = Op::new(
-        &runner.device,
-        "matmul",
-        node.input
-            .iter()
-            .map(|input| runner.get_storage(input))
-            .collect(),
-        node.output
-            .iter()
-            .map(|output| runner.get_storage(output))
-            .collect(),
-    );
+    let ops = graph
+        .node
+        .iter()
+        .map(|node| {
+            Op::new(
+                &runner.device,
+                "matmul",
+                node.input
+                    .iter()
+                    .map(|input| runner.get_storage(input))
+                    .collect(),
+                node.output
+                    .iter()
+                    .map(|output| runner.get_storage(output))
+                    .collect(),
+                node.op_type(),
+            )
+        })
+        .collect::<anyhow::Result<Vec<Op>>>()?;
 
     let mut encoder = runner
         .device
@@ -286,20 +290,24 @@ fn main() -> anyhow::Result<()> {
             label: Some("Compute Pass"),
         });
 
-        op.run(&mut compute_pass)?;
+        for op in &ops {
+            op.run(&mut compute_pass)?;
+        }
     }
     runner.queue.submit(std::iter::once(encoder.finish()));
 
     println!("created op");
 
     let tensor = runner.get_storage(graph.output[0].name());
-    let tensor_bytes = tensor.to_bytes(&runner.device);
-    let tensor_vec = unsafe {
-        let ptr = tensor_bytes.as_ptr() as *const f32;
-        std::slice::from_raw_parts(ptr, tensor_bytes.len() / 4)
-    };
+    let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
+    let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 
-    println!("{:?}", tensor_vec);
+    for i in 0..4 {
+        for j in 0..20 {
+            print!("{:1.1} ", tensor_vec[i * 20 + j]);
+        }
+        println!();
+    }
 
     Ok(())
 }

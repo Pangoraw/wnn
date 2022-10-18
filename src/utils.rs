@@ -16,18 +16,34 @@ pub(crate) fn get_attr_ints<'a>(node: &'a onnx::NodeProto, name: &str) -> Option
     })
 }
 
+pub(crate) fn get_attr_string<'a>(node: &'a onnx::NodeProto, name: &str) -> Option<&'a str> {
+    node.attribute.iter().find_map(|attr| {
+        if attr.name() == name {
+            std::str::from_utf8(attr.s()).ok()
+        } else {
+            None
+        }
+    })
+}
+
+pub(crate) fn external_data(tensor: &onnx::TensorProto) {
+    if matches!(
+        tensor.data_location(),
+        onnx::tensor_proto::DataLocation::EXTERNAL
+    ) {
+        for key in &tensor.external_data {
+            println!("{} => {}", key.key(), key.value());
+        }
+    }
+}
+
 // There is sometimes an issue where the data is not actually in the
 // tensor.T_data field so we use raw_data instead.
 pub(crate) fn int_slice_from_tensor(tensor: &onnx::TensorProto) -> &[i64] {
     if !tensor.int64_data.is_empty() {
         &tensor.int64_data
     } else {
-        let raw_data = tensor.raw_data();
-        let slice = unsafe {
-            let ptr = raw_data.as_ptr() as *const i64;
-            std::slice::from_raw_parts(ptr, raw_data.len() / std::mem::size_of::<i64>())
-        };
-        slice
+        bytemuck::cast_slice(tensor.raw_data())
     }
 }
 
@@ -35,10 +51,6 @@ pub(crate) fn float_slice_from_tensor(tensor: &onnx::TensorProto) -> &[f32] {
     if !tensor.float_data.is_empty() {
         &tensor.float_data
     } else {
-        let raw_data = tensor.raw_data();
-        unsafe {
-            let ptr = raw_data.as_ptr() as *const f32;
-            std::slice::from_raw_parts(ptr, raw_data.len() / std::mem::size_of::<f32>())
-        }
+        bytemuck::cast_slice(tensor.raw_data())
     }
 }

@@ -238,13 +238,16 @@ impl<'a> ShapeInferer<'a> {
                     .collect::<anyhow::Result<Vec<&Shape>>>()?;
                 let pads =
                     get_attr_ints(node, "pads").ok_or_else(|| anyhow!("could not find pads"))?;
-                let strides =
-                    get_attr_ints(node, "strides").ok_or_else(|| anyhow!("could not find pads"))?;
+                let strides = get_attr_ints(node, "strides")
+                    .ok_or_else(|| anyhow!("could not find strides"))?;
                 let x = input_shapes[0];
                 let w = input_shapes[1];
 
                 if x.ndims() != 4 || w.ndims() != 4 {
                     bail!("invalid convolution {} o {}", x, w);
+                }
+                if pads.len() != 4 {
+                    bail!("invalid pads {:?}", pads);
                 }
 
                 let mut out_shape = Shape::empty();
@@ -351,7 +354,7 @@ impl<'a> ShapeInferer<'a> {
                 let a = &self.shapes[node.input[0].as_str()];
                 let b = &self.shapes[node.input[1].as_str()];
                 let c = &self.shapes[node.input[2].as_str()];
-                if a != b {
+                if a != b || b != c {
                     bail!("invalid Where({}, {}, {})", a, b, c);
                 }
                 vec![a.clone()]

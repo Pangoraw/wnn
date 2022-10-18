@@ -14,3 +14,4 @@ pollster = "0.2"
 human_bytes = { version = "0.3", features = ["bibytes"] }
 env_logger = "0.9"
 log = "0.4"
+bytemuck = "1.12.1"
