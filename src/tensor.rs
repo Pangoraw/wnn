@@ -2,9 +2,9 @@ use std::fmt::Display;
 
 use anyhow::bail;
 
-use crate::{onnx, shape::Shape};
+use crate::onnx;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum DataType {
     I32,
     I64,

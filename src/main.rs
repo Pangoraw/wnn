@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Context};
 use protobuf::Message;
 
@@ -18,9 +20,9 @@ mod utils;
 
 fn main() -> anyhow::Result<()> {
     // let filename = "./simple_model.onnx";
-    // let filename = "vae_decoder_sim.onnx";
+    let filename = "vae_decoder_sim.onnx";
     // let filename = "unet.onnx";
-    let filename = "./model.onnx";
+    // let filename = "./model.onnx";
     // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_pytorch_1_1.onnx";
     // let filename = "/home/pberg/Projects/ONNX.jl/model.onnx";
     // let filename = "/home/pberg/Projects/ONNX.jl/model_sim.onnx";
@@ -186,79 +188,51 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let mut total_alloc_size = 0;
-    let max_alloc_size = 7_500_000_000; // TODO: get GPU capacity
-
     let mut runner = pollster::block_on(gpu::Runner::new())?;
     for init in &graph.initializer {
         let dtype = dtype_inferer.get_type(init.name());
         let shape = shape_inferer.get_shape(init.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        total_alloc_size += desc.size_of();
-        let pretty = human_bytes::human_bytes(desc.size_of() as u32);
-        println!(
-            "allocating {} {}",
-            pretty,
-            human_bytes::human_bytes(total_alloc_size as f64)
-        );
         runner.add_init(init, desc)?;
-
-        if total_alloc_size > max_alloc_size {
-            anyhow::bail!(
-                "stopping at node {} when allocating {}",
-                init.name(),
-                pretty
-            );
-        }
-    }
-
-    for inter in &intermediaries {
-        let dtype = dtype_inferer.get_type(inter);
-        let shape = shape_inferer.get_shape(inter);
-        let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        total_alloc_size += desc.size_of();
-        let pretty = human_bytes::human_bytes(desc.size_of() as u32);
-        let is_output = graph
-            .output
-            .iter()
-            .any(|node| node.name() == inter.as_str());
-
-        println!(
-            "allocating {} {} {}",
-            pretty,
-            human_bytes::human_bytes(total_alloc_size as f64),
-            is_output
-        );
-        runner.add_node(inter, desc, is_output)?;
-
-        if total_alloc_size > max_alloc_size {
-            anyhow::bail!("stopping at node {} when allocating {}", inter, pretty);
-        }
     }
 
     for input in &graph.input {
         let dtype = dtype_inferer.get_type(input.name());
         let shape = shape_inferer.get_shape(input.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        total_alloc_size += desc.size_of();
-        let pretty = human_bytes::human_bytes(desc.size_of() as u32);
-        println!(
-            "allocating {} {}",
-            pretty,
-            human_bytes::human_bytes(total_alloc_size as f64),
-        );
         let floats: Vec<f32> = std::iter::repeat(1.0)
             .take(shape.numel().unwrap())
             .collect();
         runner.add_node_with_init(input.name(), desc, bytemuck::cast_slice(&floats))?;
-        if total_alloc_size > max_alloc_size {
-            anyhow::bail!(
-                "stopping at node {} when allocating {}",
-                input.name(),
-                pretty
-            );
+    }
+
+    for output in &graph.output {
+        let dtype = dtype_inferer.get_type(output.name());
+        let shape = shape_inferer.get_shape(output.name());
+        let desc = TensorDesc::new(shape.clone(), dtype.clone());
+        runner.add_node(output.name(), desc, true)?;
+    }
+
+    let mut descs = HashMap::new();
+    for inter in &intermediaries {
+        let dtype = dtype_inferer.get_type(inter);
+        let shape = shape_inferer.get_shape(inter);
+        let desc = TensorDesc::new(shape.clone(), dtype.clone());
+        let is_output = graph
+            .output
+            .iter()
+            .any(|node| node.name() == inter.as_str());
+
+        if !is_output {
+            descs.insert(inter.as_str(), desc);
         }
     }
+    runner.allocate_tensors(&graph.node, descs)?;
+
+    println!(
+        "total_alloc_size = {}",
+        human_bytes::human_bytes(runner.total_allocated_size() as f64)
+    );
 
     let ops = graph
         .node
@@ -266,15 +240,15 @@ fn main() -> anyhow::Result<()> {
         .map(|node| {
             Op::new(
                 &runner.device,
-                "matmul",
+                node.name(),
                 node.input
                     .iter()
                     .map(|input| runner.get_storage(input))
-                    .collect(),
+                    .collect::<anyhow::Result<Vec<&gpu::TensorStorage>>>()?,
                 node.output
                     .iter()
                     .map(|output| runner.get_storage(output))
-                    .collect(),
+                    .collect::<anyhow::Result<Vec<&gpu::TensorStorage>>>()?,
                 node.op_type(),
             )
         })
@@ -298,7 +272,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("created op");
 
-    let tensor = runner.get_storage(graph.output[0].name());
+    let tensor = runner.get_storage(graph.output[0].name())?;
     let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
     let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail, Context};
 use wgpu::{include_wgsl, util::DeviceExt};
 
 use crate::{onnx, shape::Shape, tensor::DataType};
 
+#[derive(Clone)]
 pub(crate) struct TensorDesc {
     shape: Shape,
     dtype: DataType,
@@ -96,11 +97,13 @@ impl Op {
         outputs: Vec<&TensorStorage>,
         op: &str,
     ) -> anyhow::Result<Self> {
+        let filename = format!("shaders/{}.wgsl", op.to_lowercase());
         let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("Shader {}", op)),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(std::fs::read_to_string(
-                format!("shaders/{}.wgsl", op.to_lowercase()),
-            )?)),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(
+                std::fs::read_to_string(&filename)
+                    .with_context(|| anyhow!("while opening file {}", &filename))?,
+            )),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(&format!("Compute Pipeline {}", name)),
@@ -157,7 +160,12 @@ pub(crate) struct Runner<'a> {
     pub(crate) queue: wgpu::Queue,
 
     tensors: HashMap<&'a str, TensorStorage>,
+
+    slots: Vec<TensorStorage>,
+    which_slots: HashMap<&'a str, usize>,
 }
+
+const MAX_ALLOC_LIMIT: u64 = 7_500_000_000;
 
 impl<'a> Runner<'a> {
     pub(crate) async fn new() -> anyhow::Result<Runner<'a>> {
@@ -185,11 +193,111 @@ impl<'a> Runner<'a> {
             device,
             queue,
             tensors: HashMap::new(),
+            slots: Vec::new(),
+            which_slots: HashMap::new(),
         })
     }
 
-    pub(crate) fn get_storage(&self, name: &str) -> &TensorStorage {
-        &self.tensors[name]
+    pub(crate) fn total_allocated_size(&self) -> u64 {
+        self.tensors
+            .values()
+            .map(|tensor| tensor.buffer.size())
+            .sum::<u64>()
+            + self
+                .slots
+                .iter()
+                .map(|tensor| tensor.buffer.size())
+                .sum::<u64>()
+    }
+
+    /// Performs tensor allocation by grouping allocations of the same size together.
+    /// NOTE: We can probably do better by using bigger buffers to host smaller buffers.
+    ///       but this seems good enough for models where the same activation size can often be seen.
+    pub(crate) fn allocate_tensors(
+        &mut self,
+        nodes: &'a [onnx::NodeProto],
+        descs: HashMap<&str, TensorDesc>,
+    ) -> anyhow::Result<()> {
+        let mut starts = HashMap::new();
+        let mut ends = HashMap::new();
+
+        let mut current_size = self.total_allocated_size();
+
+        struct Slot {
+            free: bool,
+        }
+
+        let mut slots: Vec<Slot> = Vec::new();
+
+        // Iterate the nodes in reverse to get liveness ranges for free.
+        for (i, node) in nodes.iter().enumerate().rev() {
+            for input in &node.input {
+                if self.tensors.contains_key(input.as_str()) || !descs.contains_key(input.as_str())
+                {
+                    continue;
+                }
+
+                // When node appears for the first time,
+                // reserve a slot for it or allocate one.
+                if !ends.contains_key(input) {
+                    ends.insert(input, i);
+
+                    // 2. Find free slot
+                    if let Some((i, slot)) = slots.iter_mut().enumerate().find(|(i, slot)| {
+                        slot.free
+                            && self.slots[*i].desc.shape == descs[input.as_str()].shape
+                            && self.slots[*i].desc.dtype == descs[input.as_str()].dtype
+                    }) {
+                        // 2.1) Reserve free slot if available
+                        slot.free = false;
+                        self.which_slots.insert(input.as_str(), i);
+                    } else {
+                        let desc = descs[input.as_str()].clone();
+                        current_size += desc.size_of() as u64;
+
+                        if current_size > MAX_ALLOC_LIMIT {
+                            bail!(
+                                "out-of-memory error when allocating {} for {}",
+                                human_bytes::human_bytes(current_size as f64),
+                                input
+                            );
+                        }
+
+                        // 2.2) Create slot otherwise
+                        self.slots
+                            .push(TensorStorage::new(&self.device, desc, None, false));
+                        slots.push(Slot { free: false });
+                        self.which_slots.insert(input.as_str(), slots.len() - 1);
+                    }
+                }
+            }
+
+            for output in &node.output {
+                if self.tensors.contains_key(output.as_str())
+                    || !descs.contains_key(output.as_str())
+                {
+                    continue;
+                }
+
+                starts.insert(output, i);
+
+                // 1) When output appears mark slot as free
+                let slot: &mut Slot = &mut slots[self.which_slots[output.as_str()]];
+                slot.free = true;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn get_storage(&self, name: &str) -> anyhow::Result<&TensorStorage> {
+        self.tensors
+            .get(name)
+            .or_else(|| match self.which_slots.get(name) {
+                Some(i) if *i < self.slots.len() => Some(&self.slots[*i]),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow!("tensor {} not found", name))
     }
 
     pub(crate) fn add_node(
