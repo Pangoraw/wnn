@@ -9,6 +9,7 @@ use crate::{
     tensor::DataType,
 };
 
+mod compiler;
 mod gpu;
 mod onnx;
 mod ops;
@@ -19,8 +20,8 @@ mod type_inference;
 mod utils;
 
 fn main() -> anyhow::Result<()> {
-    // let filename = "./simple_model.onnx";
-    let filename = "vae_decoder_sim.onnx";
+    let filename = "./simple_model.onnx";
+    // let filename = "vae_decoder_sim.onnx";
     // let filename = "unet.onnx";
     // let filename = "./model.onnx";
     // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_pytorch_1_1.onnx";
@@ -188,32 +189,39 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
+    // TODO: Move things out of main();
+
+    let mut descs = HashMap::new(); // TODO: move this inside the runner/type inference phase
     let mut runner = pollster::block_on(gpu::Runner::new())?;
+
     for init in &graph.initializer {
         let dtype = dtype_inferer.get_type(init.name());
         let shape = shape_inferer.get_shape(init.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        runner.add_init(init, desc)?;
+        runner.add_init(init, desc.clone())?;
+        descs.insert(init.name(), desc);
     }
 
     for input in &graph.input {
         let dtype = dtype_inferer.get_type(input.name());
         let shape = shape_inferer.get_shape(input.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        let floats: Vec<f32> = std::iter::repeat(1.0)
+        let floats: Vec<f32> = std::iter::repeat([1.0, -1.0, 1.0])
+            .flatten()
             .take(shape.numel().unwrap())
             .collect();
-        runner.add_node_with_init(input.name(), desc, bytemuck::cast_slice(&floats))?;
+        runner.add_node_with_init(input.name(), desc.clone(), bytemuck::cast_slice(&floats))?;
+        descs.insert(input.name(), desc);
     }
 
     for output in &graph.output {
         let dtype = dtype_inferer.get_type(output.name());
         let shape = shape_inferer.get_shape(output.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        runner.add_node(output.name(), desc, true)?;
+        runner.add_node(output.name(), desc.clone(), true)?;
+        descs.insert(output.name(), desc);
     }
 
-    let mut descs = HashMap::new();
     for inter in &intermediaries {
         let dtype = dtype_inferer.get_type(inter);
         let shape = shape_inferer.get_shape(inter);
@@ -227,7 +235,7 @@ fn main() -> anyhow::Result<()> {
             descs.insert(inter.as_str(), desc);
         }
     }
-    runner.allocate_tensors(&graph.node, descs)?;
+    runner.allocate_tensors(&graph.node, &descs)?;
 
     println!(
         "total_alloc_size = {}",
@@ -240,7 +248,6 @@ fn main() -> anyhow::Result<()> {
         .map(|node| {
             Op::new(
                 &runner.device,
-                node.name(),
                 node.input
                     .iter()
                     .map(|input| runner.get_storage(input))
@@ -249,7 +256,8 @@ fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|output| runner.get_storage(output))
                     .collect::<anyhow::Result<Vec<&gpu::TensorStorage>>>()?,
-                node.op_type(),
+                node,
+                &descs,
             )
         })
         .collect::<anyhow::Result<Vec<Op>>>()?;
@@ -272,13 +280,15 @@ fn main() -> anyhow::Result<()> {
 
     println!("created op");
 
-    let tensor = runner.get_storage(graph.output[0].name())?;
+    let output = &graph.output[0];
+    let tensor = runner.get_storage(output.name())?;
     let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
     let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 
-    for i in 0..4 {
-        for j in 0..20 {
-            print!("{:1.1} ", tensor_vec[i * 20 + j]);
+    for i in 0..descs[output.name()].shape.concrete_size(0)? {
+        let n = descs[output.name()].shape.concrete_size(1)?;
+        for j in 0..n {
+            print!("{:1.1} ", tensor_vec[i * n + j]);
         }
         println!();
     }

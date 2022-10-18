@@ -98,6 +98,10 @@ impl Shape {
         &self.dims[self.reldim(dim)]
     }
 
+    pub(crate) fn as_ints(&self) -> anyhow::Result<Vec<i64>> {
+        (0..self.ndims()).map(|i| self.as_int(i as _)).collect()
+    }
+
     // TODO: Store constants as Vec<i64> not shapes.
     pub(crate) fn as_int(&self, dim: isize) -> anyhow::Result<i64> {
         match self.dims[self.reldim(dim)] {

@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context};
 use wgpu::{include_wgsl, util::DeviceExt};
 
-use crate::{onnx, shape::Shape, tensor::DataType};
+use crate::{compiler::compile_node, onnx, shape::Shape, tensor::DataType};
 
 #[derive(Clone)]
 pub(crate) struct TensorDesc {
-    shape: Shape,
-    dtype: DataType,
+    pub(crate) shape: Shape,
+    pub(crate) dtype: DataType,
 }
 
 impl TensorDesc {
@@ -92,27 +92,26 @@ pub(crate) struct Op {
 impl Op {
     pub(crate) fn new(
         device: &wgpu::Device,
-        name: &str,
         inputs: Vec<&TensorStorage>,
         outputs: Vec<&TensorStorage>,
-        op: &str,
+        node: &onnx::NodeProto,
+        descs: &HashMap<&str, TensorDesc>,
     ) -> anyhow::Result<Self> {
-        let filename = format!("shaders/{}.wgsl", op.to_lowercase());
+        let shader = compile_node(node, descs)?;
+        let shader_source = shader.to_wgsl()?;
+
         let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&format!("Shader {}", op)),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(
-                std::fs::read_to_string(&filename)
-                    .with_context(|| anyhow!("while opening file {}", &filename))?,
-            )),
+            label: Some(&format!("Shader {}", node.name())),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(shader_source)),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(&format!("Compute Pipeline {}", name)),
+            label: Some(&format!("Compute Pipeline {}", node.name())),
             layout: None,
             module: &kernel,
             entry_point: "main",
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(&format!("Bind Group Compute {}", name)),
+            label: Some(&format!("Bind Group Compute {}", node.name())),
             entries: &inputs
                 .iter()
                 .chain(outputs.iter())
@@ -125,19 +124,10 @@ impl Op {
             layout: &pipeline.get_bind_group_layout(0),
         });
 
-        let (x, y) = match op {
-            "MatMul" => (
-                outputs[0].desc.shape.concrete_size(1)?,
-                inputs[0].desc.shape.concrete_size(0)?,
-            ),
-            "Relu" => (inputs[0].desc.shape.numel().unwrap(), 1),
-            _ => unimplemented!("{op}"),
-        };
-
         Ok(Self {
             pipeline,
             bind_group,
-            dispatch: (x as _, y as _, 1),
+            dispatch: shader.dispatch(),
         })
     }
 
@@ -216,7 +206,7 @@ impl<'a> Runner<'a> {
     pub(crate) fn allocate_tensors(
         &mut self,
         nodes: &'a [onnx::NodeProto],
-        descs: HashMap<&str, TensorDesc>,
+        descs: &HashMap<&str, TensorDesc>,
     ) -> anyhow::Result<()> {
         let mut starts = HashMap::new();
         let mut ends = HashMap::new();
