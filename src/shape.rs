@@ -80,7 +80,7 @@ impl Shape {
         self.dims.insert(self.reldim(idx), dim);
     }
 
-    fn reldim(&self, dim: isize) -> usize {
+    pub(crate) fn reldim(&self, dim: isize) -> usize {
         if dim < 0 {
             (self.dims.len() as isize + dim) as usize
         } else {

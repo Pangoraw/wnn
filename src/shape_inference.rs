@@ -347,7 +347,18 @@ impl<'a> ShapeInferer<'a> {
                     .insert(node.output[0].as_str(), input_shape.clone());
                 vec![Shape::from(&[input_shape.ndims() as _])]
             }
-            "InstanceNormalization" | "Cast" | "Relu" | "Sigmoid" | "Softmax" | "Tanh" => {
+            "GlobalAveragePool" => {
+                let input_shape = &self.shapes[node.input[0].as_str()];
+                let output_shape = Shape::from(
+                    &[input_shape.concrete_size(0)? as i64,
+                    input_shape.concrete_size(1)? as i64,
+                    1,
+                    1
+                    ]
+                );
+                vec![output_shape]
+            }
+            "BatchNormalization" | "InstanceNormalization" | "Cast" | "Relu" | "Sigmoid" | "Softmax" | "Tanh" => {
                 vec![self.shapes[node.input[0].as_str()].clone()]
             }
             "Where" => {

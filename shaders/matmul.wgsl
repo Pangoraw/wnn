@@ -17,7 +17,8 @@ var<storage, read> input_right: array<f32>;
 
 @compute @workgroup_size({{ workgroup_x }})
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let gx = global_id.x;
+    {% for group in range(end=num_groups) %}
+    let gx = global_id.x{% if group > 0 %} + {{ group }}u {% endif %};
 
     if gx >= {{ o_lens[0] }}u {
         return;
@@ -46,4 +47,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     output[gx] = {% if alpha != 1.0 %} {{ alpha }} * {% endif %} tmpsum {% if i_lens | length == 3 %}
         + {% if beta != 1.0 %} {{ beta }} * {% endif %} bias[x]
     {% endif %};
+
+    {% endfor %}
 }

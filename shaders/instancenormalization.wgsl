@@ -30,6 +30,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     for (var k: u32 = 0u; k < {{ i_strides[0][1] }}u; k = k + 1u) {
         let i = start + k;
         let element = input[i];
+
+        if i >= {{ o_lens[0] }}u {
+            return;
+        }
+
         output[i] = scale[gidy] * element / denom + bias[gidy];
     }
 }

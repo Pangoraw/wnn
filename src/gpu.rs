@@ -106,6 +106,8 @@ impl Op {
             .to_wgsl()
             .with_context(|| anyhow!("compiling shader for {}", node.name()))?;
 
+        // println!("{shader_source}");
+
         let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("Shader {}", node.name())),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(shader_source)),
@@ -121,7 +123,7 @@ impl Op {
             entries: &inputs
                 .iter()
                 .take(
-                    if node.op_type() == "Reshape" {
+                    if node.op_type() == "Reshape" || node.op_type() == "Resize" {
                         1
                     } else {
                         node.input.len()
@@ -170,7 +172,7 @@ impl<'a> Runner<'a> {
         let instance = wgpu::Instance::new(wgpu::Backends::all());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+                power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 ..Default::default()
             })
@@ -180,7 +182,10 @@ impl<'a> Runner<'a> {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     features: wgpu::Features::empty(),
-                    limits: wgpu::Limits::default(),
+                    limits: wgpu::Limits{
+                        max_storage_buffer_binding_size: 268435456,
+                        ..Default::default()
+                    },
                     label: Some("Compute Device"),
                 },
                 None,
@@ -215,6 +220,7 @@ impl<'a> Runner<'a> {
         &mut self,
         nodes: &'a [onnx::NodeProto],
         descs: &HashMap<&str, TensorDesc>,
+        force_readable: bool,
     ) -> anyhow::Result<()> {
         let mut starts = HashMap::new();
         let mut ends = HashMap::new();
@@ -262,7 +268,8 @@ impl<'a> Runner<'a> {
 
                         // 2.2) Create slot otherwise
                         self.slots
-                            .push(TensorStorage::new(&self.device, desc, None, false));
+                            .push(TensorStorage::new(&self.device, desc, None, force_readable));
+
                         slots.push(Slot { free: false });
                         self.which_slots.insert(input.as_str(), slots.len() - 1);
                     }

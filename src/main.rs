@@ -20,13 +20,18 @@ mod type_inference;
 mod utils;
 
 fn main() -> anyhow::Result<()> {
+    let dump_all_to_file: Option<&str> = // None;
+                                         Some("output.txt");
+
     // let filename = "./model.onnx";
     // let filename = "vae_decoder_sim.onnx";
+    // let filename = "vae_decoder.onnx";
     // let filename = "unet.onnx";
-    // let filename = "./model.onnx";
+    // let filename = "./simple_model.onnx";
+    let filename = "/home/paul/Downloads/resnet18-v1-7.onnx";
     // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_pytorch_1_1.onnx";
     // let filename = "/home/pberg/Projects/ONNX.jl/model.onnx";
-    let filename = "/home/pberg/Projects/ONNX.jl/model_sim.onnx";
+    // let filename = "/home/pberg/Projects/ONNX.jl/model_sim.onnx";
     // let filename = "unet_sim2.onnx";
     // let filename = "/home/pberg/Downloads/uc_merced_model(2).onnx";
 
@@ -39,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     let dim_mappings = {
         let mut map = std::collections::HashMap::new();
         map.insert(
-            "batch",
+            "N",
             crate::shape::Dimension::Concrete(1),
             //  crate::shape::Dimension::Symbolic(String::from("batch")),
         );
@@ -57,7 +62,7 @@ fn main() -> anyhow::Result<()> {
         let shape = Shape::from(&init.dims);
         let dtype = DataType::from_int(init.data_type())?;
         dtype_inferer.init(init.name(), dtype);
-        shape_inferer.init(init.name(), shape);
+        shape_inferer.init(init.name(), shape.clone());
     }
 
     println!("==== INPUT");
@@ -70,7 +75,6 @@ fn main() -> anyhow::Result<()> {
                 })?;
             Shape::from_tensor_shape_with_maps(tensor_shape, &dim_mappings)
         };
-        println!("input {} {}", input.name(), shape);
         dtype_inferer.init(input.name(), dtype);
         shape_inferer.init(input.name(), shape);
     }
@@ -211,6 +215,16 @@ fn main() -> anyhow::Result<()> {
             .flatten()
             .take(shape.numel().unwrap())
             .collect();
+
+        // Some inputs can also be present in initializers
+        if graph
+            .initializer
+            .iter()
+            .any(|init| init.name() == input.name())
+        {
+            continue;
+        }
+
         runner.add_node_with_init(input.name(), desc.clone(), bytemuck::cast_slice(&floats))?;
         descs.insert(input.name(), desc);
     }
@@ -236,7 +250,9 @@ fn main() -> anyhow::Result<()> {
             descs.insert(inter.as_str(), desc);
         }
     }
-    runner.allocate_tensors(&graph.node, &descs)?;
+    runner
+        .allocate_tensors(&graph.node, &descs, dump_all_to_file.is_some())
+        .with_context(|| anyhow!("when allocating nodes"))?;
 
     println!(
         "total_alloc_size = {}",
@@ -251,7 +267,13 @@ fn main() -> anyhow::Result<()> {
                 &runner.device,
                 node.input
                     .iter()
-                    .map(|input| runner.get_storage(input))
+                    .filter_map(|input| {
+                        if input.is_empty() {
+                            None
+                        } else {
+                            Some(runner.get_storage(input))
+                        }
+                    })
                     .collect::<anyhow::Result<Vec<&gpu::TensorStorage>>>()?,
                 node.output
                     .iter()
@@ -263,35 +285,60 @@ fn main() -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<Vec<Op>>>()?;
 
-    let mut encoder = runner
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Compute Command Encoder"),
-        });
-    {
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Compute Pass"),
-        });
+    // We submit things in chunks as it turns out submitting 500+ shaders at once
+    // is not really appreciated by the GPU :((
+    let chunks = 10;
 
-        for op in &ops {
-            op.run(&mut compute_pass);
+    for chunk in ops.chunks(chunks) {
+        let mut encoder = runner
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Compute Command Encoder"),
+            });
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass"),
+            });
+
+            for op in chunk {
+                op.run(&mut compute_pass);
+            }
         }
+        runner.queue.submit(std::iter::once(encoder.finish()));
     }
-    runner.queue.submit(std::iter::once(encoder.finish()));
 
-    println!("created op");
+    if let Some(filepath) = dump_all_to_file {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(filepath)?;
+        for inter in &intermediaries {
+            let tensor = runner.get_storage(inter)?;
 
-    let output = &graph.output[0];
-    let tensor = runner.get_storage(output.name())?;
-    let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
-    let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
+            println!("{inter}");
+            let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
+            let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 
-    for i in 0..descs[output.name()].shape.concrete_size(0)? {
-        let n = descs[output.name()].shape.concrete_size(1)?;
-        for j in 0..n {
-            print!("{:1.1} ", tensor_vec[i * n + j]);
+            let inter_shape = &descs[inter.as_str()].shape;
+
+            writeln!(&mut file, "{inter}{inter_shape}")?;
+            for i in 0..inter_shape.numel().unwrap() {
+                write!(&mut file, "{:1.4} ", tensor_vec[i])?;
+            }
+            writeln!(&mut file)?;
         }
-        println!();
+    } else {
+        let output = &graph.output[0];
+        let tensor = runner.get_storage(output.name())?;
+        let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
+        let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
+
+        let out_shape = &descs[output.name()].shape;
+
+        for i in 0..out_shape.numel().unwrap() {
+            print!("{:1.4} ", tensor_vec[i]);
+        }
     }
 
     Ok(())
