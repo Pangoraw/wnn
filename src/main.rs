@@ -20,14 +20,15 @@ mod type_inference;
 mod utils;
 
 fn main() -> anyhow::Result<()> {
-    let filename = "./simple_model.onnx";
+    // let filename = "./model.onnx";
     // let filename = "vae_decoder_sim.onnx";
     // let filename = "unet.onnx";
     // let filename = "./model.onnx";
     // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_pytorch_1_1.onnx";
     // let filename = "/home/pberg/Projects/ONNX.jl/model.onnx";
-    // let filename = "/home/pberg/Projects/ONNX.jl/model_sim.onnx";
+    let filename = "/home/pberg/Projects/ONNX.jl/model_sim.onnx";
     // let filename = "unet_sim2.onnx";
+    // let filename = "/home/pberg/Downloads/uc_merced_model(2).onnx";
 
     let mut onnx_file = std::fs::OpenOptions::new()
         .read(true)
@@ -206,7 +207,7 @@ fn main() -> anyhow::Result<()> {
         let dtype = dtype_inferer.get_type(input.name());
         let shape = shape_inferer.get_shape(input.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        let floats: Vec<f32> = std::iter::repeat([1.0, -1.0, 1.0])
+        let floats: Vec<f32> = std::iter::repeat([1.0])
             .flatten()
             .take(shape.numel().unwrap())
             .collect();
@@ -273,7 +274,7 @@ fn main() -> anyhow::Result<()> {
         });
 
         for op in &ops {
-            op.run(&mut compute_pass)?;
+            op.run(&mut compute_pass);
         }
     }
     runner.queue.submit(std::iter::once(encoder.finish()));

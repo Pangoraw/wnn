@@ -27,6 +27,10 @@ pub(crate) struct TensorStorage {
 }
 
 impl TensorStorage {
+    pub(crate) fn size(&self) -> u64 {
+        self.buffer.size()
+    }
+
     pub(crate) fn new(
         device: &wgpu::Device,
         desc: TensorDesc,
@@ -98,7 +102,9 @@ impl Op {
         descs: &HashMap<&str, TensorDesc>,
     ) -> anyhow::Result<Self> {
         let shader = compile_node(node, descs)?;
-        let shader_source = shader.to_wgsl()?;
+        let shader_source = shader
+            .to_wgsl()
+            .with_context(|| anyhow!("compiling shader for {}", node.name()))?;
 
         let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("Shader {}", node.name())),
@@ -114,6 +120,13 @@ impl Op {
             label: Some(&format!("Bind Group Compute {}", node.name())),
             entries: &inputs
                 .iter()
+                .take(
+                    if node.op_type() == "Reshape" {
+                        1
+                    } else {
+                        node.input.len()
+                    },
+                )
                 .chain(outputs.iter())
                 .enumerate()
                 .map(|(i, tensor)| wgpu::BindGroupEntry {
@@ -131,17 +144,12 @@ impl Op {
         })
     }
 
-    pub(crate) fn run<'a>(
-        &'a self,
-        compute_pass: &mut wgpu::ComputePass<'a>,
-    ) -> anyhow::Result<()> {
+    pub(crate) fn run<'a>(&'a self, compute_pass: &mut wgpu::ComputePass<'a>) {
         compute_pass.set_pipeline(&self.pipeline);
         compute_pass.set_bind_group(0, &self.bind_group, &[]);
 
         let (x, y, z) = self.dispatch;
         compute_pass.dispatch_workgroups(x, y, z);
-
-        Ok(())
     }
 }
 
@@ -235,8 +243,7 @@ impl<'a> Runner<'a> {
                     // 2. Find free slot
                     if let Some((i, slot)) = slots.iter_mut().enumerate().find(|(i, slot)| {
                         slot.free
-                            && self.slots[*i].desc.shape == descs[input.as_str()].shape
-                            && self.slots[*i].desc.dtype == descs[input.as_str()].dtype
+                            && self.slots[*i].desc.size_of() == descs[input.as_str()].size_of()
                     }) {
                         // 2.1) Reserve free slot if available
                         slot.free = false;
@@ -309,7 +316,14 @@ impl<'a> Runner<'a> {
         tensor: &'a onnx::TensorProto,
         desc: TensorDesc,
     ) -> anyhow::Result<()> {
-        self.add_node_with_init(tensor.name(), desc, tensor.raw_data())
+        let raw_data = if matches!(desc.dtype, DataType::F32) && !tensor.float_data.is_empty() {
+            bytemuck::cast_slice(&tensor.float_data)
+        } else if matches!(desc.dtype, DataType::I64) && !tensor.int64_data.is_empty() {
+            bytemuck::cast_slice(&tensor.int64_data)
+        } else {
+            tensor.raw_data()
+        };
+        self.add_node_with_init(tensor.name(), desc, raw_data)
     }
 
     pub(crate) fn add_node_with_init(
@@ -318,6 +332,14 @@ impl<'a> Runner<'a> {
         desc: TensorDesc,
         raw_data: &[u8],
     ) -> anyhow::Result<()> {
+        if raw_data.len() != desc.size_of() {
+            bail!(
+                "invalid raw_data (len {}) for tensor {} of size {}",
+                raw_data.len(),
+                name,
+                desc.shape
+            );
+        }
         let storage = TensorStorage::new_with_init(&self.device, raw_data, desc, Some(name));
         if self.tensors.contains_key(name) {
             anyhow::bail!("tensor {} was already inserted in runner", name);

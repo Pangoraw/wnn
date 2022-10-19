@@ -16,6 +16,12 @@ pub(crate) fn get_attr_ints<'a>(node: &'a onnx::NodeProto, name: &str) -> Option
     })
 }
 
+pub(crate) fn get_attr_float(node: &onnx::NodeProto, name: &str) -> Option<f32> {
+    node.attribute
+        .iter()
+        .find_map(|attr| if attr.name() == name { attr.f } else { None })
+}
+
 pub(crate) fn get_attr_string<'a>(node: &'a onnx::NodeProto, name: &str) -> Option<&'a str> {
     node.attribute.iter().find_map(|attr| {
         if attr.name() == name {

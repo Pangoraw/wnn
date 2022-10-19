@@ -210,7 +210,7 @@ impl Shape {
     }
 
     pub(crate) fn pad_left_to(&mut self, n: usize) {
-        while self.ndims() != n {
+        while self.ndims() < n {
             self.unsqueeze(0);
         }
     }
