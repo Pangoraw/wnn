@@ -3,7 +3,12 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context};
 use wgpu::{include_wgsl, util::DeviceExt};
 
-use crate::{compiler::compile_node, onnx, shape::Shape, tensor::DataType};
+use crate::{
+    compiler::{compile_node, is_reshape_op},
+    onnx,
+    shape::Shape,
+    tensor::DataType,
+};
 
 #[derive(Clone)]
 pub(crate) struct TensorDesc {
@@ -182,7 +187,7 @@ impl<'a> Runner<'a> {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     features: wgpu::Features::empty(),
-                    limits: wgpu::Limits{
+                    limits: wgpu::Limits {
                         max_storage_buffer_binding_size: 268435456,
                         ..Default::default()
                     },
@@ -225,6 +230,16 @@ impl<'a> Runner<'a> {
         let mut starts = HashMap::new();
         let mut ends = HashMap::new();
 
+        let mut aliases = HashMap::new();
+        for node in nodes {
+            if is_reshape_op(node.op_type()) {
+                let input = &node.input[0];
+                let output = &node.output[0];
+
+                aliases.insert(input, output);
+            }
+        }
+
         let mut current_size = self.total_allocated_size();
 
         struct Slot {
@@ -235,7 +250,14 @@ impl<'a> Runner<'a> {
 
         // Iterate the nodes in reverse to get liveness ranges for free.
         for (i, node) in nodes.iter().enumerate().rev() {
-            for input in &node.input {
+            if is_reshape_op(node.op_type()) {
+                continue;
+            }
+
+            for input in node.input.iter().map(|input| match aliases.get(input) {
+                Some(output) => output,
+                None => input,
+            }) {
                 if self.tensors.contains_key(input.as_str()) || !descs.contains_key(input.as_str())
                 {
                     continue;
@@ -267,16 +289,23 @@ impl<'a> Runner<'a> {
                         }
 
                         // 2.2) Create slot otherwise
-                        self.slots
-                            .push(TensorStorage::new(&self.device, desc, None, force_readable));
+                        self.slots.push(TensorStorage::new(
+                            &self.device,
+                            desc,
+                            None,
+                            force_readable,
+                        ));
 
                         slots.push(Slot { free: false });
-                        self.which_slots.insert(input.as_str(), slots.len() - 1);
+                        self.which_slots.insert(input, slots.len() - 1);
                     }
                 }
             }
 
-            for output in &node.output {
+            for output in node.output.iter().map(|input| match aliases.get(input) {
+                Some(output) => output,
+                None => input,
+            }) {
                 if self.tensors.contains_key(output.as_str())
                     || !descs.contains_key(output.as_str())
                 {
@@ -290,6 +319,45 @@ impl<'a> Runner<'a> {
                 slot.free = true;
             }
         }
+
+        for (input, output) in aliases {
+            assert!(!self.which_slots.contains_key(input.as_str()));
+            self.which_slots
+                .insert(input.as_str(), self.which_slots[output.as_str()]);
+        }
+
+        println!("=== ALLOCATIONS");
+        for node in nodes {
+            for (i, output) in node.output.iter().enumerate() {
+                print!(
+                    "{}(#{})",
+                    output,
+                    match self.which_slots.get(output.as_str()) {
+                        Some(s) => *s as isize,
+                        None => -1,
+                    }
+                );
+                if i != node.output.len() - 1 {
+                    print!(", ");
+                }
+            }
+            print!("\t= {}(", node.name());
+            for (i, input) in node.input.iter().enumerate() {
+                print!(
+                    "{}(#{})",
+                    input,
+                    match self.which_slots.get(input.as_str()) {
+                        Some(s) => *s as isize,
+                        None => -1,
+                    }
+                );
+                if i != node.input.len() - 1 {
+                    print!(", ");
+                }
+            }
+            println!(")")
+        }
+        println!("===============");
 
         Ok(())
     }

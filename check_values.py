@@ -22,8 +22,9 @@ for i in range(0, len(data), 2):
     outputs[name] = np.array([float(f) for f in tdata.split(" ")]).reshape(shape)
 
 import onnx
+from pathlib import Path
 
-model_path = "/home/paul/Downloads/resnet18-v1-7.onnx"
+model_path = Path("~/Downloads/uc_merced_model(2).onnx").expanduser()
 model = onnx.load(model_path)
 # model.graph.output.extend(list(outputs.keys()))
 
@@ -36,16 +37,22 @@ inter_layers = list(outputs.keys())
 shape_info = onnx.shape_inference.infer_shapes(model)
 for idx, node in enumerate(shape_info.graph.value_info):
     if node.name in inter_layers:
-        print(idx, node)
+        # print(idx, node)
         value_info_protos.append(node)
 
 model.graph.output.extend(value_info_protos)  #  in inference stage, these tensor will be added to output dict.
 onnx.checker.check_model(model)
 onnx.save(model, './test.onnx')
 
-sess = ort.InferenceSession("./test.onnx")
-ort_outputs = sess.run(list(outputs.keys()), {"data": np.ones((1,3,224,224), dtype=np.float32)})
+onnx_input = model.graph.input[0]
+input_shape = tuple(d.dim_value for d in onnx_input.type.tensor_type.shape.dim)
+input = np.ones(input_shape, dtype=np.float32)
 
+sess = ort.InferenceSession("./test.onnx")
+ort_outputs = sess.run(list(outputs.keys()), {onnx_input.name: input}) 
+
+print()
+print("checking equality")
 for (k, a), b in zip(outputs.items(), ort_outputs):
     if not np.equal(a, b).all():
         print(k)
@@ -56,3 +63,5 @@ for (k, a), b in zip(outputs.items(), ort_outputs):
             print(f"{f:1.03f} ", end="")
         print()
         break
+    else:
+        print(f"{k} ✅")

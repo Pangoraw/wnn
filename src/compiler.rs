@@ -245,7 +245,6 @@ pub(crate) fn compile_node(
                 context.insert("num_groups", &1);
             }
 
-
             ShaderInvocation {
                 file_name: "resize",
                 context,
@@ -253,8 +252,7 @@ pub(crate) fn compile_node(
             }
         }
         "Softmax" => {
-            let axis = get_attr_int(node, "axis")
-                .ok_or_else(|| anyhow!("axis is not present on Softmax"))?;
+            let axis = get_attr_int(node, "axis").unwrap_or(-1);
 
             let out_shape = &descs[node.output[0].as_str()].shape;
             let real_axis = out_shape.reldim(axis as isize);
@@ -312,10 +310,6 @@ pub(crate) fn compile_node(
             let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let k_strides = get_attr_ints(node, "strides").unwrap_or(&[1, 1]);
             context.insert("k_strides", k_strides);
-
-            for attr in &node.attribute {
-                println!("{} = {:?}", attr.name(), get_attr_ints(node, attr.name()));
-            }
 
             let mut dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
             if dispatch_x > MAX_COMPUTE_WORKGROUPS_PER_DIMENSION {
@@ -488,6 +482,10 @@ pub(crate) fn compile_node(
     };
 
     Ok(invoc)
+}
+
+pub(crate) fn is_reshape_op(op_type: &str) -> bool {
+    matches!(op_type, "Reshape" | "Identity" | "Flatten" | "Squeeze" | "Unsqueeze")
 }
 
 fn ceil(x: u64, factor: u64) -> u64 {

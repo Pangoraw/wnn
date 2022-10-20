@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context};
 use protobuf::Message;
 
 use crate::{
+    compiler::is_reshape_op,
     gpu::{Op, TensorDesc},
     shape::Shape,
     tensor::DataType,
@@ -20,16 +21,18 @@ mod type_inference;
 mod utils;
 
 fn main() -> anyhow::Result<()> {
-    let dump_all_to_file: Option<&str> = // None;
-                                         Some("output.txt");
+    let dump_all_to_file: Option<&str> = None;
+    // Some("output.txt");
 
     // let filename = "./model.onnx";
     // let filename = "vae_decoder_sim.onnx";
     // let filename = "vae_decoder.onnx";
     // let filename = "unet.onnx";
     // let filename = "./simple_model.onnx";
-    let filename = "/home/paul/Downloads/resnet18-v1-7.onnx";
+    // let filename = "/home/paul/Downloads/resnet18-v1-7.onnx";
+    let filename = "/home/pberg/Downloads/resnet18-v1-7.onnx";
     // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_pytorch_1_1.onnx";
+    // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_fp16_pytorch_fixed.onnx";
     // let filename = "/home/pberg/Projects/ONNX.jl/model.onnx";
     // let filename = "/home/pberg/Projects/ONNX.jl/model_sim.onnx";
     // let filename = "unet_sim2.onnx";
@@ -258,10 +261,12 @@ fn main() -> anyhow::Result<()> {
         "total_alloc_size = {}",
         human_bytes::human_bytes(runner.total_allocated_size() as f64)
     );
+    // return Ok(());
 
     let ops = graph
         .node
         .iter()
+        .filter(|node| !is_reshape_op(node.op_type()))
         .map(|node| {
             Op::new(
                 &runner.device,
@@ -287,9 +292,9 @@ fn main() -> anyhow::Result<()> {
 
     // We submit things in chunks as it turns out submitting 500+ shaders at once
     // is not really appreciated by the GPU :((
-    let chunks = 10;
+    let chunk_size = 10;
 
-    for chunk in ops.chunks(chunks) {
+    for chunk in ops.chunks(chunk_size) {
         let mut encoder = runner
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -337,6 +342,9 @@ fn main() -> anyhow::Result<()> {
         let out_shape = &descs[output.name()].shape;
 
         for i in 0..out_shape.numel().unwrap() {
+            if i > 20 {
+                break;
+            }
             print!("{:1.4} ", tensor_vec[i]);
         }
     }
