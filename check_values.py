@@ -1,7 +1,13 @@
+import argparse
 import onnxruntime as ort
 import numpy as np
 
-with open("./output.txt") as f:
+parser = argparse.ArgumentParser("Compare values with onnxruntime")
+parser.add_argument("model_file")
+parser.add_argument("--output_file", default="output.txt")
+args = parser.parse_args()
+
+with open(args.output_file) as f:
     data = [l.strip() for l in f.readlines()]
 
 outputs = {}
@@ -24,7 +30,7 @@ for i in range(0, len(data), 2):
 import onnx
 from pathlib import Path
 
-model_path = Path("~/Downloads/uc_merced_model(2).onnx").expanduser()
+model_path = Path(args.model_file).expanduser()
 model = onnx.load(model_path)
 # model.graph.output.extend(list(outputs.keys()))
 

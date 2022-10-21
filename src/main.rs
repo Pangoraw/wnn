@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Context};
 use protobuf::Message;
+use structopt::StructOpt;
 
 use crate::{
     compiler::is_reshape_op,
@@ -20,9 +21,18 @@ mod tensor;
 mod type_inference;
 mod utils;
 
+#[derive(StructOpt, Debug)]
+struct Args {
+    #[structopt(default_value = "./sd-v1-5-onnx/vae_decoder_sim.onnx")]
+    input_model: std::path::PathBuf,
+    dump_all_to_file: Option<std::path::PathBuf>,
+}
+
 fn main() -> anyhow::Result<()> {
-    let dump_all_to_file: Option<&str> = None;
-    // Some("output.txt");
+    let args = Args::from_args();
+
+    let dump_all_to_file = args.dump_all_to_file;
+    let filename = args.input_model;
 
     // let filename = "./model.onnx";
     // let filename = "vae_decoder_sim.onnx";
@@ -30,7 +40,8 @@ fn main() -> anyhow::Result<()> {
     // let filename = "unet.onnx";
     // let filename = "./simple_model.onnx";
     // let filename = "/home/paul/Downloads/resnet18-v1-7.onnx";
-    let filename = "/home/pberg/Downloads/resnet18-v1-7.onnx";
+    // let filename = "/home/pberg/Downloads/resnet18-v1-7.onnx";
+    // let filename = "./sd-v1-5-onnx/vae_decoder_sim.onnx";
     // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_pytorch_1_1.onnx";
     // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_fp16_pytorch_fixed.onnx";
     // let filename = "/home/pberg/Projects/ONNX.jl/model.onnx";
@@ -40,8 +51,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut onnx_file = std::fs::OpenOptions::new()
         .read(true)
-        .open(filename)
-        .with_context(|| format!("while opening file {}", filename))?;
+        .open(&filename)
+        .with_context(|| format!("while opening file {}", filename.display()))?;
     let model = onnx::ModelProto::parse_from_reader(&mut onnx_file)?;
 
     let dim_mappings = {
@@ -169,9 +180,18 @@ fn main() -> anyhow::Result<()> {
         if let Some(shape) = &val.type_.tensor_type().shape.0 {
             let computed_shape = shape_inferer.get_shape(val.name());
             let info_shape = Shape::from_tensor_shape(shape);
-            if computed_shape != &info_shape {
-                println!(
-                    "warning: {}: computed {}, stored {}",
+            let computed_type = dtype_inferer.get_type(val.name());
+            let info_type = DataType::from_int(val.type_.tensor_type().elem_type())?;
+            if computed_type != &info_type {
+                log::warn!(
+                    "{}: computed {:?}, stored {:?}",
+                    val.name(),
+                    computed_type,
+                    info_type
+                );
+            } else if computed_shape != &info_shape {
+                log::warn!(
+                    "{}: computed {}, stored {}",
                     val.name(),
                     computed_shape,
                     info_shape
@@ -219,7 +239,7 @@ fn main() -> anyhow::Result<()> {
             .take(shape.numel().unwrap())
             .collect();
 
-        // Some inputs can also be present in initializers
+        // Some inputs can also be present in initializers, skip those
         if graph
             .initializer
             .iter()

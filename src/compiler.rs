@@ -143,6 +143,30 @@ fn base_context(node: &onnx::NodeProto, descs: &TensorDescs) -> anyhow::Result<t
 const MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP: u64 = 256;
 const MAX_COMPUTE_WORKGROUPS_PER_DIMENSION: u64 = 65535;
 
+fn dispatch_invocations(n_invocs: u64) -> (u64, u64, u64) {
+    let mut dispatch_x = ceil(n_invocs, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
+
+    let num_groups = if dispatch_x > MAX_COMPUTE_WORKGROUPS_PER_DIMENSION {
+        dispatch_x = MAX_COMPUTE_WORKGROUPS_PER_DIMENSION;
+        ceil(dispatch_x, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION)
+    } else {
+        1
+    };
+
+    (
+        MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(n_invocs),
+        dispatch_x,
+        num_groups,
+    )
+}
+
+fn add_invocs_to_context(context: &mut tera::Context, n_invocs: u64) -> u64 {
+    let (workgroup_x, dispatch_x, num_groups) = dispatch_invocations(n_invocs);
+    context.insert("workgroup_x", &workgroup_x);
+    context.insert("num_groups", &num_groups);
+    dispatch_x
+}
+
 pub(crate) fn compile_node(
     node: &onnx::NodeProto,
     descs: &TensorDescs,
@@ -160,21 +184,8 @@ pub(crate) fn compile_node(
             context.insert("alpha", &alpha);
             context.insert("beta", &beta);
 
-            let workgroup_x = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
-            let mut dispatch_x = ceil(workgroup_x, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
-
-            context.insert(
-                "workgroup_x",
-                &MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(workgroup_x),
-            );
-
-            if dispatch_x > MAX_COMPUTE_WORKGROUPS_PER_DIMENSION {
-                dispatch_x = MAX_COMPUTE_WORKGROUPS_PER_DIMENSION;
-                let num_groups = ceil(dispatch_x, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION);
-                context.insert("num_groups", &num_groups);
-            } else {
-                context.insert("num_groups", &1);
-            }
+            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             ShaderInvocation {
                 file_name: "matmul",
@@ -186,20 +197,8 @@ pub(crate) fn compile_node(
             let epsilon = get_attr_float(node, "epsilon").unwrap_or(1e-4);
             context.insert("epsilon", &epsilon);
 
-            let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
-            let mut dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
-            if dispatch_x > MAX_COMPUTE_WORKGROUPS_PER_DIMENSION {
-                dispatch_x = MAX_COMPUTE_WORKGROUPS_PER_DIMENSION;
-                let num_groups = ceil(dispatch_x, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION);
-                context.insert("num_groups", &num_groups);
-            } else {
-                context.insert("num_groups", &1);
-            }
-
-            context.insert(
-                "workgroup_x",
-                &MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(out_shape),
-            );
+            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             ShaderInvocation {
                 file_name: "batchnormalization",
@@ -230,20 +229,8 @@ pub(crate) fn compile_node(
                 );
             }
 
-            let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
-            let mut dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
-            context.insert(
-                "workgroup_x",
-                &MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(out_shape),
-            );
-
-            if dispatch_x > MAX_COMPUTE_WORKGROUPS_PER_DIMENSION {
-                dispatch_x = MAX_COMPUTE_WORKGROUPS_PER_DIMENSION;
-                let num_groups = ceil(dispatch_x, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION);
-                context.insert("num_groups", &num_groups);
-            } else {
-                context.insert("num_groups", &1);
-            }
+            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             ShaderInvocation {
                 file_name: "resize",
@@ -275,20 +262,9 @@ pub(crate) fn compile_node(
         }
         act @ ("Relu" | "Sigmoid" | "Reshape" | "Identity" | "Flatten" | "Squeeze"
         | "Unsqueeze") => {
-            let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
-            let mut dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
-            if dispatch_x > MAX_COMPUTE_WORKGROUPS_PER_DIMENSION {
-                dispatch_x = MAX_COMPUTE_WORKGROUPS_PER_DIMENSION;
-                let num_groups = ceil(dispatch_x, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION);
-                context.insert("num_groups", &num_groups);
-            } else {
-                context.insert("num_groups", &1);
-            }
+            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
-            context.insert(
-                "workgroup_x",
-                &MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(out_shape),
-            );
             context.insert(
                 "activation",
                 match act {
@@ -307,23 +283,12 @@ pub(crate) fn compile_node(
         }
         "Conv" => {
             let weight_shape = &descs[node.input[1].as_str()].shape;
-            let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let k_strides = get_attr_ints(node, "strides").unwrap_or(&[1, 1]);
             context.insert("k_strides", k_strides);
 
-            let mut dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
-            if dispatch_x > MAX_COMPUTE_WORKGROUPS_PER_DIMENSION {
-                dispatch_x = MAX_COMPUTE_WORKGROUPS_PER_DIMENSION;
-                let num_groups = ceil(dispatch_x, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION);
-                context.insert("num_groups", &num_groups);
-            } else {
-                context.insert("num_groups", &1);
-            }
+            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
-            context.insert(
-                "workgroup_x",
-                &MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(out_shape),
-            );
             context.insert(
                 "kernel_size",
                 &[
@@ -355,6 +320,7 @@ pub(crate) fn compile_node(
                 "workgroup_x",
                 &MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(out_shape),
             );
+
             let mut i_strides = input_a.shape.as_ints()?;
             ints_to_strides(&mut i_strides);
             context.insert(
@@ -380,21 +346,9 @@ pub(crate) fn compile_node(
             input_b.pad_left_to(input_a.ndims());
 
             let out_shape = &descs[node.output[0].as_str()].shape;
-            let out_numel = out_shape.numel().unwrap() as u64;
-            let mut dispatch_x = ceil(out_numel, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
 
-            if dispatch_x > MAX_COMPUTE_WORKGROUPS_PER_DIMENSION {
-                dispatch_x = MAX_COMPUTE_WORKGROUPS_PER_DIMENSION;
-                let num_groups = ceil(dispatch_x, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION);
-                context.insert("num_groups", &num_groups);
-            } else {
-                context.insert("num_groups", &1);
-            }
-
-            context.insert(
-                "workgroup_x",
-                &MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(out_numel),
-            );
+            let n_invocs = out_shape.numel().unwrap() as u64;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             let i_strides = [&input_a, &input_b]
                 .iter()
@@ -446,7 +400,6 @@ pub(crate) fn compile_node(
         "GlobalAveragePool" => {
             let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
-
             context.insert(
                 "workgroup_x",
                 &MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(out_shape),
@@ -485,7 +438,10 @@ pub(crate) fn compile_node(
 }
 
 pub(crate) fn is_reshape_op(op_type: &str) -> bool {
-    matches!(op_type, "Reshape" | "Identity" | "Flatten" | "Squeeze" | "Unsqueeze")
+    matches!(
+        op_type,
+        "Reshape" | "Identity" | "Flatten" | "Squeeze" | "Unsqueeze"
+    )
 }
 
 fn ceil(x: u64, factor: u64) -> u64 {

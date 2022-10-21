@@ -48,6 +48,7 @@ impl<'a> TypeInferer<'a> {
                     .ok_or_else(|| anyhow!("could not infer type (no attr found)"))?;
                 vec![dtype]
             }
+            "Shape" => vec![DataType::I64],
             "Cast" => {
                 let to = get_attr_int(node, "to")
                     .ok_or_else(|| anyhow!("failed to get to attribute"))?;

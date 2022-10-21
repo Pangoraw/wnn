@@ -190,6 +190,19 @@ impl<'a> ShapeInferer<'a> {
                     ),
                 );
 
+                /*
+                if let Some(constants) = node
+                    .input
+                    .iter()
+                    .map(|input| self.constants.get(input.as_str()))
+                    .collect::<Option<Vec<&Shape>>>()
+                {
+                    println!("here we are");
+                    if constants.iter().all(|s| s.is_scalar()) {
+                        dbg!("here we are");
+                    }
+                }*/
+
                 vec![out_shape]
             }
             "Unsqueeze" => {
@@ -349,16 +362,21 @@ impl<'a> ShapeInferer<'a> {
             }
             "GlobalAveragePool" => {
                 let input_shape = &self.shapes[node.input[0].as_str()];
-                let output_shape = Shape::from(
-                    &[input_shape.concrete_size(0)? as i64,
+                let output_shape = Shape::from(&[
+                    input_shape.concrete_size(0)? as i64,
                     input_shape.concrete_size(1)? as i64,
                     1,
-                    1
-                    ]
-                );
+                    1,
+                ]);
                 vec![output_shape]
             }
-            "BatchNormalization" | "InstanceNormalization" | "Cast" | "Relu" | "Sigmoid" | "Softmax" | "Tanh" => {
+            "BatchNormalization"
+            | "InstanceNormalization"
+            | "Cast"
+            | "Relu"
+            | "Sigmoid"
+            | "Softmax"
+            | "Tanh" => {
                 vec![self.shapes[node.input[0].as_str()].clone()]
             }
             "Where" => {
