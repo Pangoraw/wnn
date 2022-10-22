@@ -14,7 +14,6 @@ use crate::{
 mod compiler;
 mod gpu;
 mod onnx;
-mod ops;
 mod shape;
 mod shape_inference;
 mod tensor;
