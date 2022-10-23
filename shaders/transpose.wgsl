@@ -17,8 +17,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     {% for dim in o_sizes[0] %}
         let dim_index = rest / {{ o_strides[0][loop.index0] }}u;
 
-        {% if pi_strides[0][loop.index0] %}
-            input_index = index + dim_index * {{ pi_strides[0][loop.index0] }}u;
+        {% if pi_strides[loop.index0] > 0 %}
+            input_index = input_index + dim_index * {{ pi_strides[loop.index0] }}u;
         {% endif %}
 
         rest = rest % {{ o_strides[0][loop.index0] }}u;

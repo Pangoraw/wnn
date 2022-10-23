@@ -111,7 +111,7 @@ impl Op {
             .to_wgsl()
             .with_context(|| anyhow!("compiling shader for {}", node.name()))?;
 
-        // println!("{shader_source}");
+        println!("{shader_source}");
 
         let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("Shader {}", node.name())),
@@ -401,38 +401,44 @@ impl<'a> Runner<'a> {
                 .insert(input.as_str(), self.which_slots[output.as_str()]);
         }
 
-        println!("=== ALLOCATIONS");
-        for node in nodes {
-            for (i, output) in node.output.iter().enumerate() {
-                print!(
-                    "{}(#{})",
-                    output,
-                    match self.which_slots.get(output.as_str()) {
-                        Some(s) => *s as isize,
-                        None => -1,
+        if &std::env::var_os("DUMP_ALLOCS")
+            .map(|s| s.to_str().unwrap().to_owned())
+            .unwrap_or(String::from("1"))
+            == "1"
+        {
+            println!("=== ALLOCATIONS");
+            for node in nodes {
+                for (i, output) in node.output.iter().enumerate() {
+                    print!(
+                        "{}(#{})",
+                        output,
+                        match self.which_slots.get(output.as_str()) {
+                            Some(s) => *s as isize,
+                            None => -1,
+                        }
+                    );
+                    if i != node.output.len() - 1 {
+                        print!(", ");
                     }
-                );
-                if i != node.output.len() - 1 {
-                    print!(", ");
                 }
-            }
-            print!("\t= {}(", node.name());
-            for (i, input) in node.input.iter().enumerate() {
-                print!(
-                    "{}(#{})",
-                    input,
-                    match self.which_slots.get(input.as_str()) {
-                        Some(s) => *s as isize,
-                        None => -1,
+                print!("\t= {}(", node.name());
+                for (i, input) in node.input.iter().enumerate() {
+                    print!(
+                        "{}(#{})",
+                        input,
+                        match self.which_slots.get(input.as_str()) {
+                            Some(s) => *s as isize,
+                            None => -1,
+                        }
+                    );
+                    if i != node.input.len() - 1 {
+                        print!(", ");
                     }
-                );
-                if i != node.input.len() - 1 {
-                    print!(", ");
                 }
+                println!(")")
             }
-            println!(")")
+            println!("===============");
         }
-        println!("===============");
 
         Ok(())
     }
@@ -484,10 +490,11 @@ impl<'a> Runner<'a> {
     ) -> anyhow::Result<()> {
         if raw_data.len() != desc.size_of() {
             bail!(
-                "invalid raw_data (len {}) for tensor {} of size {}",
+                "invalid raw_data (len {}) for tensor {} of size {}, type {}",
                 raw_data.len(),
                 name,
-                desc.shape
+                desc.shape,
+                desc.dtype,
             );
         }
         let storage = TensorStorage::new_with_init(&self.device, raw_data, desc, Some(name));

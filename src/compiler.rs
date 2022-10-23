@@ -18,7 +18,7 @@ lazy_static! {
         ("conv", include_str!("../shaders/conv.wgsl")),
         ("maxpool", include_str!("../shaders/maxpool.wgsl")),
         ("transpose", include_str!("../shaders/transpose.wgsl")),
-        ("mul", include_str!("../shaders/mul.wgsl")),
+        ("broadcast", include_str!("../shaders/broadcast.wgsl")),
         ("resize", include_str!("../shaders/resize.wgsl")),
         ("softmax", include_str!("../shaders/softmax.wgsl")),
         (
@@ -229,8 +229,22 @@ pub(crate) fn compile_node(
                 );
             }
 
-            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            match get_attr_string(node, "coordinate_transformation_mode") {
+                Some("asymmetric") => {}
+                Some(other) => bail!("unsupported coordinate_transformation_mode '{}'", other),
+                None => bail!("unsupported coordinate_transformation_mode 'half_pixel'"),
+            }
+
+            let input_shape = &descs[node.input[0].as_str()].shape;
+            let output_shape = &descs[node.output[0].as_str()].shape;
+            let n_invocs = output_shape.numel().unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
+
+            let xy_scales = [
+                output_shape.concrete_size(2)? as f32 / input_shape.concrete_size(2)? as f32,
+                output_shape.concrete_size(3)? as f32 / input_shape.concrete_size(3)? as f32,
+            ];
+            context.insert("xy_scales", &xy_scales);
 
             ShaderInvocation {
                 file_name: "resize",
@@ -398,7 +412,7 @@ pub(crate) fn compile_node(
             );
 
             ShaderInvocation {
-                file_name: "mul",
+                file_name: "broadcast",
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -425,7 +439,7 @@ pub(crate) fn compile_node(
             let pads = get_attr_ints(node, "pads").unwrap_or(&[1, 1, 1, 1]);
             context.insert("pads", pads);
 
-            let strides = get_attr_ints(node, "strides").unwrap_or(&[1,1]);
+            let strides = get_attr_ints(node, "strides").unwrap_or(&[1, 1]);
             context.insert("k_strides", strides);
 
             let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;

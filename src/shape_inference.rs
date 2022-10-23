@@ -146,19 +146,6 @@ impl<'a> ShapeInferer<'a> {
 
                 vec![shape]
             }
-            // "MaxPool" => {
-            //     let kernel_shape = get_attr_ints(node, "kernel_shape")
-            //         .ok_or_else(|| anyhow!("kernel_shape not provided"))?;
-            //     let mut input_shape = self.shapes[node.input[0].as_str()].clone();
-            //     let factors = vec![
-            //         1.,
-            //         1.,
-            //         1. / kernel_shape[0] as f32,
-            //         1. / kernel_shape[1] as f32,
-            //     ];
-            //     input_shape.scale(&factors)?;
-            //     vec![input_shape]
-            // }
             "Flatten" => {
                 let input_shape = &self.shapes[node.input[0].as_str()];
                 let mut output_shape = Shape::empty();

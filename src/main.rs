@@ -27,6 +27,8 @@ struct Args {
     input_model: std::path::PathBuf,
 
     dump_folder: Option<std::path::PathBuf>,
+
+    force_output: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -133,29 +135,35 @@ fn main() -> anyhow::Result<()> {
             dtype_inferer.init(out, out_type);
         }
 
-        for (i, out) in node.output.iter().enumerate() {
-            print!(
-                "{}{}::{}",
-                out,
-                shape_inferer.get_shape(out),
-                dtype_inferer.get_type(out)
-            );
-            if i < node.output.len() - 1 {
-                print!(", ");
+        if &std::env::var_os("DUMP_INFERENCE")
+            .map(|s| s.to_str().unwrap().to_owned())
+            .unwrap_or(String::from("1"))
+            == "1"
+        {
+            for (i, out) in node.output.iter().enumerate() {
+                print!(
+                    "{}{}::{}",
+                    out,
+                    shape_inferer.get_shape(out),
+                    dtype_inferer.get_type(out)
+                );
+                if i < node.output.len() - 1 {
+                    print!(", ");
+                }
             }
+            print!("\t= {}[{}](", node.name(), node.op_type());
+            for (i, input) in node.input.iter().enumerate() {
+                if input.is_empty() {
+                    print!("None");
+                } else {
+                    print!("{}{}", input, shape_inferer.get_shape(input));
+                }
+                if i < node.input.len() - 1 {
+                    print!(", ");
+                }
+            }
+            println!(")");
         }
-        print!("\t= {}[{}](", node.name(), node.op_type());
-        for (i, input) in node.input.iter().enumerate() {
-            if input.is_empty() {
-                print!("None");
-            } else {
-                print!("{}{}", input, shape_inferer.get_shape(input));
-            }
-            if i < node.input.len() - 1 {
-                print!(", ");
-            }
-        }
-        println!(")")
     }
 
     println!("=== OUTPUT");
@@ -230,7 +238,9 @@ fn main() -> anyhow::Result<()> {
         let dtype = dtype_inferer.get_type(init.name());
         let shape = shape_inferer.get_shape(init.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        runner.add_init(init, desc.clone())?;
+        runner
+            .add_init(init, desc.clone())
+            .with_context(|| anyhow!("failed to create buffer for node {}", init.name()))?;
         descs.insert(init.name(), desc);
     }
 
@@ -238,8 +248,8 @@ fn main() -> anyhow::Result<()> {
         let dtype = dtype_inferer.get_type(input.name());
         let shape = shape_inferer.get_shape(input.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        let floats: Vec<f32> = std::iter::repeat([1.0])
-            .flatten()
+        let floats: Vec<f32> =// std::iter::repeat([1.0]) .flatten()
+            (0..10000).map(|i| i as f32)
             .take(shape.numel().unwrap())
             .collect();
 
@@ -252,6 +262,7 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
+        println!("here?");
         runner.add_node_with_init(input.name(), desc.clone(), bytemuck::cast_slice(&floats))?;
         descs.insert(input.name(), desc);
     }
