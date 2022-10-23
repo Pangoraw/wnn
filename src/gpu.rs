@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context};
-use wgpu::{include_wgsl, util::DeviceExt};
+use wgpu::util::DeviceExt;
 
 use crate::{
     compiler::{compile_node, is_reshape_op},
@@ -170,7 +170,7 @@ pub(crate) struct Runner<'a> {
     which_slots: HashMap<&'a str, usize>,
 }
 
-const MAX_ALLOC_LIMIT: u64 = 7_500_000_000;
+const MAX_ALLOC_LIMIT: u64 = 3_500_000_000;
 
 impl<'a> Runner<'a> {
     pub(crate) async fn new() -> anyhow::Result<Runner<'a>> {
@@ -230,6 +230,88 @@ impl<'a> Runner<'a> {
         let mut starts = HashMap::new();
         let mut ends = HashMap::new();
 
+        let mut current_size = self.total_allocated_size();
+
+        struct Slot {
+            free: bool,
+        }
+
+        let mut slots: Vec<Slot> = Vec::new();
+
+        // Dumb allocation strategy to be able to save the tensor activations
+        if force_readable {
+            for node in nodes {
+                if is_reshape_op(node.op_type()) {
+                    let input = &node.input[0];
+                    let output = &node.output[0];
+
+                    if self.tensors.contains_key(input.as_str()) {
+                        self.tensors.remove(input.as_str());
+                    }
+
+                    if self.tensors.contains_key(output.as_str()) {
+                        self.tensors.remove(input.as_str());
+                    }
+
+                    let input_desc = descs[input.as_str()].clone();
+                    self.slots.push(TensorStorage::new(
+                        &self.device,
+                        input_desc,
+                        None,
+                        force_readable,
+                    ));
+
+                    slots.push(Slot { free: false });
+                    self.which_slots.insert(input, slots.len() - 1);
+                    self.which_slots.insert(output, slots.len() - 1);
+
+                    continue;
+                }
+
+                for input in &node.input {
+                    if self.tensors.contains_key(input.as_str())
+                        || self.which_slots.contains_key(input.as_str())
+                        || !descs.contains_key(input.as_str())
+                    {
+                        continue;
+                    }
+                    let desc = descs[input.as_str()].clone();
+                    current_size += desc.size_of() as u64;
+                    if current_size > MAX_ALLOC_LIMIT {
+                        bail!(
+                            "out-of-memory error when allocating {} (currently at {}) for {}",
+                            human_bytes::human_bytes(desc.size_of() as f64),
+                            human_bytes::human_bytes(current_size as f64),
+                            input
+                        );
+                    }
+                    self.add_node(input.as_str(), desc, true)?;
+                }
+
+                for output in &node.output {
+                    if self.tensors.contains_key(output.as_str())
+                        || self.which_slots.contains_key(output.as_str())
+                        || !descs.contains_key(output.as_str())
+                    {
+                        continue;
+                    }
+                    let desc = descs[output.as_str()].clone();
+                    current_size += desc.size_of() as u64;
+                    if current_size > MAX_ALLOC_LIMIT {
+                        bail!(
+                            "out-of-memory error when allocating {} (currently at {}) for {}",
+                            human_bytes::human_bytes(desc.size_of() as f64),
+                            human_bytes::human_bytes(current_size as f64),
+                            output
+                        );
+                    }
+                    self.add_node(output.as_str(), desc, true)?;
+                }
+            }
+
+            return Ok(());
+        }
+
         let mut aliases = HashMap::new();
         for node in nodes {
             if is_reshape_op(node.op_type()) {
@@ -239,14 +321,6 @@ impl<'a> Runner<'a> {
                 aliases.insert(input, output);
             }
         }
-
-        let mut current_size = self.total_allocated_size();
-
-        struct Slot {
-            free: bool,
-        }
-
-        let mut slots: Vec<Slot> = Vec::new();
 
         // Iterate the nodes in reverse to get liveness ranges for free.
         for (i, node) in nodes.iter().enumerate().rev() {
@@ -278,11 +352,12 @@ impl<'a> Runner<'a> {
                         self.which_slots.insert(input.as_str(), i);
                     } else {
                         let desc = descs[input.as_str()].clone();
-                        current_size += desc.size_of() as u64;
 
+                        current_size += desc.size_of() as u64;
                         if current_size > MAX_ALLOC_LIMIT {
                             bail!(
-                                "out-of-memory error when allocating {} for {}",
+                                "out-of-memory error when allocating {} (currently at {}) for {}",
+                                human_bytes::human_bytes(desc.size_of() as f64),
                                 human_bytes::human_bytes(current_size as f64),
                                 input
                             );

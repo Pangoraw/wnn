@@ -146,19 +146,19 @@ impl<'a> ShapeInferer<'a> {
 
                 vec![shape]
             }
-            "MaxPool" => {
-                let kernel_shape = get_attr_ints(node, "kernel_shape")
-                    .ok_or_else(|| anyhow!("kernel_shape not provided"))?;
-                let mut input_shape = self.shapes[node.input[0].as_str()].clone();
-                let factors = vec![
-                    1.,
-                    1.,
-                    1. / kernel_shape[0] as f32,
-                    1. / kernel_shape[1] as f32,
-                ];
-                input_shape.scale(&factors)?;
-                vec![input_shape]
-            }
+            // "MaxPool" => {
+            //     let kernel_shape = get_attr_ints(node, "kernel_shape")
+            //         .ok_or_else(|| anyhow!("kernel_shape not provided"))?;
+            //     let mut input_shape = self.shapes[node.input[0].as_str()].clone();
+            //     let factors = vec![
+            //         1.,
+            //         1.,
+            //         1. / kernel_shape[0] as f32,
+            //         1. / kernel_shape[1] as f32,
+            //     ];
+            //     input_shape.scale(&factors)?;
+            //     vec![input_shape]
+            // }
             "Flatten" => {
                 let input_shape = &self.shapes[node.input[0].as_str()];
                 let mut output_shape = Shape::empty();
@@ -239,7 +239,7 @@ impl<'a> ShapeInferer<'a> {
                 };
                 vec![out_shape]
             }
-            "Conv" => {
+            op @ ("Conv" | "MaxPool") => {
                 let input_shapes = node
                     .input
                     .iter()
@@ -254,26 +254,44 @@ impl<'a> ShapeInferer<'a> {
                 let strides = get_attr_ints(node, "strides")
                     .ok_or_else(|| anyhow!("could not find strides"))?;
                 let x = input_shapes[0];
-                let w = input_shapes[1];
 
-                if x.ndims() != 4 || w.ndims() != 4 {
-                    bail!("invalid convolution {} o {}", x, w);
-                }
+                let kernel_shape = match (op, get_attr_ints(node, "kernel_shape")) {
+                    (_, Some(shape)) => shape.to_owned(),
+                    ("Conv", None) => {
+                        let w = input_shapes[1];
+
+                        if x.ndims() != 4 || w.ndims() != 4 {
+                            bail!("invalid convolution {} o {}", x, w);
+                        }
+
+                        vec![w.concrete_size(2)? as i64, w.concrete_size(3)? as i64]
+                    }
+                    _ => bail!("kernel_shape not found for {op}"),
+                };
+                let out_channels = match op {
+                    "Conv" => {
+                        let w = input_shapes[1];
+                        w.size(0).clone()
+                    }
+                    "MaxPool" => x.size(1).clone(),
+                    _ => unreachable!(),
+                };
+
                 if pads.len() != 4 {
                     bail!("invalid pads {:?}", pads);
                 }
 
                 let mut out_shape = Shape::empty();
                 out_shape.append_dim(x.size(0).clone()); // B
-                out_shape.append_dim(w.size(0).clone()); // C
+                out_shape.append_dim(out_channels); // C
                 out_shape.append_dim(crate::shape::Dimension::Concrete(
-                    (x.concrete_size(2)? - 2 * (w.concrete_size(2)? / 2)
+                    (x.concrete_size(2)? - 2 * (kernel_shape[0] as usize / 2)
                         + pads[0] as usize
                         + pads[2] as usize)
                         / *strides.first().unwrap_or(&1) as usize,
                 )); // H
                 out_shape.append_dim(crate::shape::Dimension::Concrete(
-                    (x.concrete_size(3)? - 2 * (w.concrete_size(3)? / 2)
+                    (x.concrete_size(3)? - 2 * (kernel_shape[1] as usize / 2)
                         + pads[1] as usize
                         + pads[3] as usize)
                         / *strides.get(1).unwrap_or(&1) as usize,

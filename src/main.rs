@@ -13,6 +13,7 @@ use crate::{
 
 mod compiler;
 mod gpu;
+mod npy;
 mod onnx;
 mod shape;
 mod shape_inference;
@@ -24,14 +25,18 @@ mod utils;
 struct Args {
     #[structopt(default_value = "./sd-v1-5-onnx/vae_decoder_sim.onnx")]
     input_model: std::path::PathBuf,
-    dump_all_to_file: Option<std::path::PathBuf>,
+
+    dump_folder: Option<std::path::PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::from_args();
 
-    let dump_all_to_file = args.dump_all_to_file;
+    let dump_folder = args.dump_folder;
     let filename = args.input_model;
+
+    // npy::read_from_file("./output2.npz.npy")?;
+    // return Ok(());
 
     // let filename = "./model.onnx";
     // let filename = "vae_decoder_sim.onnx";
@@ -273,7 +278,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
     runner
-        .allocate_tensors(&graph.node, &descs, dump_all_to_file.is_some())
+        .allocate_tensors(&graph.node, &descs, dump_folder.is_some())
         .with_context(|| anyhow!("when allocating nodes"))?;
 
     println!(
@@ -331,26 +336,19 @@ fn main() -> anyhow::Result<()> {
         runner.queue.submit(std::iter::once(encoder.finish()));
     }
 
-    if let Some(filepath) = dump_all_to_file {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(filepath)?;
+    if let Some(folder) = dump_folder {
+        if !folder.exists() {
+            std::fs::create_dir(folder)?;
+        }
+
         for inter in &intermediaries {
             let tensor = runner.get_storage(inter)?;
 
-            println!("{inter}");
             let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
             let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 
             let inter_shape = &descs[inter.as_str()].shape;
-
-            writeln!(&mut file, "{inter}{inter_shape}")?;
-            for i in 0..inter_shape.numel().unwrap() {
-                write!(&mut file, "{:1.4} ", tensor_vec[i])?;
-            }
-            writeln!(&mut file)?;
+            npy::save_to_file(&format!("activations/{inter}.npy"), tensor_vec, inter_shape)?;
         }
     } else {
         let output = &graph.output[0];
@@ -359,6 +357,12 @@ fn main() -> anyhow::Result<()> {
         let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 
         let out_shape = &descs[output.name()].shape;
+        npy::save_to_file(
+            &format!("activations/{}.npy", output.name()),
+            tensor_vec,
+            out_shape,
+        )
+        .with_context(|| anyhow!("failed to save to file output.npy"))?;
 
         for i in 0..out_shape.numel().unwrap() {
             if i > 20 {
@@ -366,6 +370,7 @@ fn main() -> anyhow::Result<()> {
             }
             print!("{:1.4} ", tensor_vec[i]);
         }
+        println!();
     }
 
     Ok(())

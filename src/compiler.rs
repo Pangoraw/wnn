@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use lazy_static::lazy_static;
 
 use crate::{
@@ -260,17 +260,16 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        act @ ("Relu" | "Sigmoid" | "Reshape" | "Identity" | "Flatten" | "Squeeze"
-        | "Unsqueeze") => {
+        act @ ("Relu" | "Sigmoid") => {
             let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             context.insert(
                 "activation",
                 match act {
+                    // f(x) =
                     "Relu" => "max(x, 0.)",
                     "Sigmoid" => "1. / (1. + exp(-x))",
-                    "Reshape" | "Identity" | "Flatten" | "Squeeze" | "Unsqueeze" => "x", // identity
                     _ => unreachable!(),
                 },
             );
@@ -282,27 +281,34 @@ pub(crate) fn compile_node(
             }
         }
         "Conv" => {
+            match get_attr_int(node, "group").unwrap_or(1) {
+                1 => {}
+                other => bail!("unsupported group = {other}"),
+            }
+            if get_attr_ints(node, "dilations")
+                .unwrap_or(&[1, 1])
+                .iter()
+                .any(|dil| *dil != 1)
+            {
+                bail!("invalid dilations {:?}", get_attr_ints(node, "dilations"));
+            }
+
             let weight_shape = &descs[node.input[1].as_str()].shape;
             let k_strides = get_attr_ints(node, "strides").unwrap_or(&[1, 1]);
             context.insert("k_strides", k_strides);
 
+            let pads = get_attr_ints(node, "pads").unwrap_or(&[0, 0, 0, 0]);
+            context.insert("pads", pads);
+
             let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
-            context.insert(
-                "kernel_size",
-                &[
-                    weight_shape.concrete_size(-2)?,
-                    weight_shape.concrete_size(-1)?,
-                ],
-            );
-            context.insert(
-                "half_kernel_size",
-                &[
-                    weight_shape.concrete_size(-2)? / 2,
-                    weight_shape.concrete_size(-1)? / 2,
-                ],
-            );
+            let kernel_shape = [
+                weight_shape.concrete_size(-2)? as i64,
+                weight_shape.concrete_size(-1)? as i64,
+            ];
+            let kernel_shape = get_attr_ints(node, "kernel_shape").unwrap_or(&kernel_shape);
+            context.insert("kernel_shape", kernel_shape);
 
             ShaderInvocation {
                 file_name: "conv",
@@ -412,17 +418,22 @@ pub(crate) fn compile_node(
             }
         }
         "MaxPool" => {
-            let kernel_size = get_attr_ints(node, "kernel_shape").unwrap();
+            let kernel_shape = get_attr_ints(node, "kernel_shape")
+                .ok_or_else(|| anyhow!("could not find pads for MaxPool"))?;
+            context.insert("kernel_shape", kernel_shape);
+
+            let pads = get_attr_ints(node, "pads").unwrap_or(&[1, 1, 1, 1]);
+            context.insert("pads", pads);
+
+            let strides = get_attr_ints(node, "strides").unwrap_or(&[1,1]);
+            context.insert("k_strides", strides);
+
             let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
 
             context.insert(
                 "workgroup_x",
                 &MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP.min(out_shape),
-            );
-            context.insert(
-                "half_kernel_size",
-                &[kernel_size[0] / 2, kernel_size[1] / 2],
             );
 
             ShaderInvocation {

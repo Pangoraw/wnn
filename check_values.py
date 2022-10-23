@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 import argparse
 import onnxruntime as ort
 import numpy as np
@@ -7,25 +9,21 @@ parser.add_argument("model_file")
 parser.add_argument("--output_file", default="output.txt")
 args = parser.parse_args()
 
-with open(args.output_file) as f:
-    data = [l.strip() for l in f.readlines()]
-
 outputs = {}
 
 def parse_name(name):
     name, shape = name.split('(')
     return name, [int(t) for t in shape[:-1].split(",")]
 
-for i in range(0, len(data), 2):
-    if i + 1 >= len(data): break
-    name = data[i]
+act_dir = Path("./activations")
+for fname in os.listdir(act_dir):
+    fpath = act_dir / fname
+    name,_ = os.path.splitext(fpath.name)
 
     if name == "": break
-    tdata = data[i + 1]
 
-    print(name)
-    name, shape = parse_name(name)
-    outputs[name] = np.array([float(f) for f in tdata.split(" ")]).reshape(shape)
+    # print(name)
+    outputs[name] = np.load(fpath)
 
 import onnx
 from pathlib import Path
@@ -39,29 +37,44 @@ model = onnx.load(model_path)
 value_info_protos = []
 
 inter_layers = list(outputs.keys())
+names = []
 
 shape_info = onnx.shape_inference.infer_shapes(model)
 for idx, node in enumerate(shape_info.graph.value_info):
     if node.name in inter_layers:
         # print(idx, node)
+        names.append(node.name)
         value_info_protos.append(node)
+
+for output in model.graph.output:
+    names.append(output.name)
 
 model.graph.output.extend(value_info_protos)  #  in inference stage, these tensor will be added to output dict.
 onnx.checker.check_model(model)
 onnx.save(model, './test.onnx')
 
 onnx_input = model.graph.input[0]
-input_shape = tuple(d.dim_value for d in onnx_input.type.tensor_type.shape.dim)
+input_shape = tuple(d.dim_value if d.dim_value != 0 else 1 for d in onnx_input.type.tensor_type.shape.dim)
 input = np.ones(input_shape, dtype=np.float32)
 
 sess = ort.InferenceSession("./test.onnx")
-ort_outputs = sess.run(list(outputs.keys()), {onnx_input.name: input}) 
+ort_outputs = sess.run(names, {onnx_input.name: input}) 
+
+THRESHOLD = 1e-4
 
 print()
 print("checking equality")
-for (k, a), b in zip(outputs.items(), ort_outputs):
-    if not np.equal(a, b).all():
-        print(k)
+# for (k, a), b in zip(outputs.items(), ort_outputs):
+for i, k in enumerate(names):
+    a = outputs[k]
+    b = ort_outputs[i]
+
+    not_equal = (np.abs(a - b) > THRESHOLD)
+    if a.size != b.size:
+        print("not equal", k, a.shape, a.size, b.shape, b.size)
+        break
+    elif not_equal.sum() != 0:
+        print(f"{not_equal.sum()}/{not_equal.size} not equal {k}")
         for f in a.flatten()[0:10]:
             print(f"{f:1.03f} ", end="")
         print()
