@@ -55,17 +55,21 @@ onnx.save(model, './test.onnx')
 
 onnx_input = model.graph.input[0]
 input_shape = tuple(d.dim_value if d.dim_value != 0 else 1 for d in onnx_input.type.tensor_type.shape.dim)
-# input = np.ones(input_shape, dtype=np.float32)
-s = 1
-for i in input_shape:
-    s *= i
-print(s)
-input = np.arange(s, dtype=np.float32).reshape(input_shape)
+
+init = "arange"
+if init == "ones":
+    input = np.ones(input_shape, dtype=np.float32)
+elif init == "arange":
+    s = 1
+    for i in input_shape:
+        s *= i
+    print(s)
+    input = np.arange(s, dtype=np.float32).reshape(input_shape)
 
 sess = ort.InferenceSession("./test.onnx")
 ort_outputs = sess.run(names, {onnx_input.name: input}) 
 
-THRESHOLD = 1e-4
+THRESHOLD = 1e-2
 
 print()
 print("checking equality")

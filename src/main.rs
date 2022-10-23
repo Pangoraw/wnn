@@ -25,10 +25,7 @@ mod utils;
 struct Args {
     #[structopt(default_value = "./sd-v1-5-onnx/vae_decoder_sim.onnx")]
     input_model: std::path::PathBuf,
-
     dump_folder: Option<std::path::PathBuf>,
-
-    force_output: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -36,9 +33,6 @@ fn main() -> anyhow::Result<()> {
 
     let dump_folder = args.dump_folder;
     let filename = args.input_model;
-
-    // npy::read_from_file("./output2.npz.npy")?;
-    // return Ok(());
 
     // let filename = "./model.onnx";
     // let filename = "vae_decoder_sim.onnx";
@@ -137,7 +131,7 @@ fn main() -> anyhow::Result<()> {
 
         if &std::env::var_os("DUMP_INFERENCE")
             .map(|s| s.to_str().unwrap().to_owned())
-            .unwrap_or(String::from("1"))
+            .unwrap_or_else(|| String::from("1"))
             == "1"
         {
             for (i, out) in node.output.iter().enumerate() {
@@ -248,10 +242,13 @@ fn main() -> anyhow::Result<()> {
         let dtype = dtype_inferer.get_type(input.name());
         let shape = shape_inferer.get_shape(input.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        let floats: Vec<f32> =// std::iter::repeat([1.0]) .flatten()
-            (0..10000).map(|i| i as f32)
-            .take(shape.numel().unwrap())
-            .collect();
+        let init = "arange";
+        let numel = shape.numel().unwrap();
+        let floats: Vec<f32> = if init == "ones" {
+            std::iter::repeat([1.0]).flatten().take(numel).collect()
+        } else {
+            (0..numel).map(|i| i as f32).take(numel).collect()
+        };
 
         // Some inputs can also be present in initializers, skip those
         if graph
@@ -262,7 +259,6 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        println!("here?");
         runner.add_node_with_init(input.name(), desc.clone(), bytemuck::cast_slice(&floats))?;
         descs.insert(input.name(), desc);
     }
@@ -375,11 +371,8 @@ fn main() -> anyhow::Result<()> {
         )
         .with_context(|| anyhow!("failed to save to file output.npy"))?;
 
-        for i in 0..out_shape.numel().unwrap() {
-            if i > 20 {
-                break;
-            }
-            print!("{:1.4} ", tensor_vec[i]);
+        for f in tensor_vec.iter().take(20) {
+            print!("{:1.4} ", f);
         }
         println!();
     }

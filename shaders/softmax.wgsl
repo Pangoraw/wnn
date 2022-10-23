@@ -8,8 +8,7 @@ var<storage, read_write> output: array<f32>;
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let gdx = global_id.x; // reduce index
 
-    let base_idx = gdx % {{ i_sizes[0][axis] }}u +
-                   {{ i_strides[0][axis] }}u * gdx / {{ i_sizes[0][axis] }}u;
+    let base_idx = {{ i_strides[0][axis] }}u * gdx * {{ i_sizes[0][axis] }}u;
 
     var sum: f32 = 0.;
     for (var k: u32 = 0u; k < {{ o_sizes[0][axis] }}u; k = k + 1u) {

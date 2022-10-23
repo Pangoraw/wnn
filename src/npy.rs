@@ -1,9 +1,11 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use std::io::{Read, Write};
 
+use crate::gpu::TensorDesc;
 use crate::shape::Shape;
+use crate::tensor::DataType;
 
-const MAGIC_STRING: [u8; 6] = [0x93, 'N' as u8, 'U' as u8, 'M' as u8, 'P' as u8, 'Y' as u8];
+const MAGIC_STRING: &[u8; 6] = b"\x93NUMPY";
 const SUPPORTED_VERSION: [u8; 2] = [
     0x01, // Major Version
     0x00, // Minor Version
@@ -36,13 +38,13 @@ pub(crate) fn save_to_file(filename: &str, data: &[f32], shape: &Shape) -> Resul
 
     assert!(n % 64 == 0);
 
-    file.write_all(&MAGIC_STRING)?;
+    file.write_all(MAGIC_STRING)?;
     file.write_all(&SUPPORTED_VERSION)?;
     file.write_all(&header_len.to_le_bytes())?; // HEADER_LEN
     file.write_all(&header)?;
 
     file.write_all(
-        &std::iter::repeat(' ' as u8)
+        &std::iter::repeat(b' ')
             .take(padding)
             .collect::<Vec<u8>>(),
     )?;
@@ -54,60 +56,126 @@ pub(crate) fn save_to_file(filename: &str, data: &[f32], shape: &Shape) -> Resul
     Ok(n)
 }
 
-pub(crate) fn read_from_file(filename: &str) -> Result<(Shape, Vec<f32>)> {
+// Reading, needs a small python-dict parser
+
+use nom::branch::alt;
+use nom::bytes::complete::{tag, take, take_until};
+use nom::character::complete::{char, i64 as nom_i64, space0};
+use nom::combinator::opt;
+use nom::multi::separated_list0;
+use nom::number::complete::le_u16;
+use nom::sequence::delimited;
+use nom::IResult;
+
+fn parse_header_len(data: &[u8]) -> IResult<&[u8], u16> {
+    let (data, _) = tag(MAGIC_STRING)(data)?;
+    let (data, major) = nom::number::complete::u8(data)?;
+    assert!(major == 1);
+
+    let (data, minor) = nom::number::complete::u8(data)?;
+    assert!(minor == 0);
+
+    le_u16(data)
+}
+
+fn extract_header(data: &[u8]) -> IResult<&[u8], &str> {
+    let (data, header_len) = parse_header_len(data)?;
+    let (data, header) = take(header_len)(data)?;
+    let header = std::str::from_utf8(header).unwrap();
+
+    Ok((data, header))
+}
+
+// We only support a subset of the things
+#[derive(Debug)]
+enum PythonVal {
+    Bool(bool),
+    Str(String),
+    IntTuple(Vec<i64>),
+}
+
+fn parse_tuple(val: &str) -> IResult<&str, PythonVal> {
+    let (rest, values) = delimited(
+        char('('),
+        separated_list0(char(','), delimited(space0, nom_i64, space0)),
+        char(')'),
+    )(val)?;
+    Ok((rest, PythonVal::IntTuple(values)))
+}
+
+fn parse_bool(val: &str) -> IResult<&str, PythonVal> {
+    let (rest, val) = alt((tag("True"), tag("False")))(val)?;
+    Ok((rest, PythonVal::Bool(val == "True")))
+}
+
+fn parse_str(val: &str) -> IResult<&str, &str> {
+    alt((
+        delimited(char('\''), take_until("'"), char('\'')),
+        delimited(char('"'), take_until("\""), char('"')),
+    ))(val)
+}
+
+fn parse_string(val: &str) -> IResult<&str, PythonVal> {
+    let (rest, s) = parse_str(val)?;
+    Ok((rest, PythonVal::Str(s.to_owned())))
+}
+
+fn parse_val(val: &str) -> IResult<&str, PythonVal> {
+    alt((parse_tuple, parse_string, parse_bool))(val)
+}
+
+fn parse_key_value(header: &str) -> IResult<&str, (&str, PythonVal)> {
+    let (rest, _) = space0(header)?;
+    let (rest, key) = parse_str(rest)?;
+    let (rest, _) = char(':')(rest)?;
+    let (rest, _) = space0(rest)?;
+    let (rest, value) = parse_val(rest)?;
+
+    Ok((rest, (key, value)))
+}
+
+fn parse_key_values(header: &str) -> IResult<&str, TensorDesc> {
+    let (rest, key_values) = separated_list0(char(','), parse_key_value)(header)?;
+
+    let mut slice: Option<Shape> = None;
+    for (k, v) in key_values {
+        match (k, &v) {
+            ("descr", PythonVal::Str(s)) if s == "float32" || s == "<f4" => {}
+            ("fortran_order", PythonVal::Bool(false)) => {}
+            ("shape", PythonVal::IntTuple(s)) => slice = Some(Shape::from(s)),
+            _ => {
+                panic!("{} {:?}", k, v)
+            }
+        }
+    }
+
+    let (rest, _) = opt(space0)(rest)?;
+    let (rest, _) = opt(char(','))(rest)?;
+    let (rest, _) = opt(space0)(rest)?;
+
+    Ok((rest, TensorDesc::new(slice.unwrap(), DataType::F32)))
+}
+
+fn parse_header(header: &str) -> IResult<&str, TensorDesc> {
+    delimited(char('{'), parse_key_values, char('}'))(header)
+}
+
+pub(crate) fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<f32>)> {
     let mut file = std::fs::OpenOptions::new().read(true).open(filename)?;
     let mut content = Vec::new();
     file.read_to_end(&mut content)?;
 
-    assert!(&content[0..6] == &MAGIC_STRING);
-    assert!(&content[6..8] == &SUPPORTED_VERSION);
+    let (slice, header) = match extract_header(&content) {
+        Ok((slice, header)) => (slice, header),
+        Err(err) => bail!("failed to parser file header: {err}"),
+    };
+    let desc = match parse_header(header) {
+        Ok((_, desc)) => desc,
+        Err(err) => bail!("failed to parse header: {err}"),
+    };
 
-    let header_offset = 8 + std::mem::size_of::<u16>();
-    let header_len_bytes: &[u8; 2] = &content[8..header_offset].try_into()?;
-    let header_len = u16::from_le_bytes(*header_len_bytes);
+    let data = bytemuck::cast_slice(slice).to_owned();
+    assert!(data.len() == desc.shape.numel().unwrap());
 
-    let header = std::str::from_utf8(&content[header_offset..header_offset + header_len as usize])?;
-
-    let mut shape: Option<Shape> = None;
-    match header
-        .trim_end()
-        .strip_prefix('{')
-        .map(|header| header.strip_suffix('}'))
-    {
-        Some(Some(header)) => {
-            for key_value in header.split(",") {
-                let (key, value) = {
-                    let key_value = key_value.split(':').collect::<Vec<&str>>();
-                    println!("{:?}", key_value);
-                    (key_value[0].trim(), key_value[1].trim())
-                };
-
-                match key {
-                    "'fortran_order'" => assert!(value == "False"),
-                    "'descr'" => assert!(value == "'float32'" || value == "'<f8'"),
-                    "'shape'" => {
-                        if let Some(Some(val)) = value
-                            .strip_prefix('(')
-                            .map(|header| header.strip_suffix(')'))
-                        {
-                            let ints = val
-                                .split(',')
-                                .map(|s| i64::from_str_radix(s.trim(), 10))
-                                .collect::<std::result::Result<Vec<i64>, std::num::ParseIntError>>(
-                            )?;
-                            shape = Some(Shape::from(&ints));
-                        }
-                    }
-                    _ => bail!("invalid key {key} in header"),
-                }
-            }
-        }
-        _ => bail!("invalid header '{header}'"),
-    }
-
-    let data = vec![1.];
-    match shape {
-        Some(s) => Ok((s, data)),
-        _ => Err(anyhow!("could not find shape")),
-    }
+    Ok((desc, data))
 }

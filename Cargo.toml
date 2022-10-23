@@ -18,3 +18,4 @@ bytemuck = "1.12.1"
 tera = { version = "1.17.1", default-features = false }
 lazy_static = "1.4.0"
 structopt = "0.3.26"
+nom = "7.1.1"

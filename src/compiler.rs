@@ -60,7 +60,7 @@ impl ShaderInvocation {
 
 // NOTE: This currently assumes that sizes is that of a contiguous tensor.
 // TODO: Implement strides in shape inference/kernels.
-fn ints_to_strides(sizes: &mut Vec<i64>) {
+fn ints_to_strides(sizes: &mut [i64]) {
     let mut current = 1;
     sizes.iter_mut().rev().for_each(|dim| {
         let x = *dim;

@@ -128,8 +128,8 @@ impl Op {
             entries: &inputs
                 .iter()
                 .take(
-                    if node.op_type() == "Reshape" || node.op_type() == "Resize" {
-                        1
+                    if node.op_type() == "Resize" {
+                        1 // These ops are tracked statically so we remove tensor "params"
                     } else {
                         node.input.len()
                     },
@@ -403,7 +403,7 @@ impl<'a> Runner<'a> {
 
         if &std::env::var_os("DUMP_ALLOCS")
             .map(|s| s.to_str().unwrap().to_owned())
-            .unwrap_or(String::from("1"))
+            .unwrap_or_else(|| String::from("1"))
             == "1"
         {
             println!("=== ALLOCATIONS");

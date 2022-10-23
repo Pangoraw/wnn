@@ -10,10 +10,11 @@ var<storage, read> bias: array<f32>;
 @group(0) @binding(3)
 var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let gidx = global_id.x; // batch index
     let gidy = global_id.y; // channel_index
+
     let start = gidx * {{ i_strides[0][0] }}u + gidy * {{ i_strides[0][1] }}u;
 
     var sum: f32 = 0.;
@@ -35,6 +36,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             return;
         }
 
-        output[i] = scale[gidy] * element / denom + bias[gidy];
+        output[i] = scale[gidy] * (element - mean) / denom + bias[gidy];
     }
 }
