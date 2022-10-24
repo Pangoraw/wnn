@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context};
 use wgpu::util::DeviceExt;
 
 use crate::{
-    compiler::{compile_node, is_reshape_op},
+    compiler::{compile_node, is_reshape_op, is_untracked_op},
     onnx,
     shape::Shape,
     tensor::DataType,
@@ -74,12 +74,12 @@ impl TensorStorage {
     pub(crate) fn read_bytes(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
         let read_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: self.buffer.size(),
+            size: self.size(),
             mapped_at_creation: false,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        encoder.copy_buffer_to_buffer(&self.buffer, 0, &read_buf, 0, self.buffer.size());
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &read_buf, 0, self.size());
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = read_buf.slice(..);
@@ -111,7 +111,7 @@ impl Op {
             .to_wgsl()
             .with_context(|| anyhow!("compiling shader for {}", node.name()))?;
 
-        println!("{shader_source}");
+        // println!("{shader_source}");
 
         let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("Shader {}", node.name())),
@@ -127,14 +127,7 @@ impl Op {
             label: Some(&format!("Bind Group Compute {}", node.name())),
             entries: &inputs
                 .iter()
-                .take(
-                    if node.op_type() == "Resize" {
-                        1 // These ops are tracked statically so we remove tensor "params"
-                    } else {
-                        node.input.len()
-                    },
-                )
-                .chain(outputs.iter())
+                .chain(&outputs)
                 .enumerate()
                 .map(|(i, tensor)| wgpu::BindGroupEntry {
                     binding: i as _,
@@ -209,13 +202,9 @@ impl<'a> Runner<'a> {
     pub(crate) fn total_allocated_size(&self) -> u64 {
         self.tensors
             .values()
-            .map(|tensor| tensor.buffer.size())
+            .map(|tensor| tensor.size())
             .sum::<u64>()
-            + self
-                .slots
-                .iter()
-                .map(|tensor| tensor.buffer.size())
-                .sum::<u64>()
+            + self.slots.iter().map(|tensor| tensor.size()).sum::<u64>()
     }
 
     /// Performs tensor allocation by grouping allocations of the same size together.
@@ -324,7 +313,7 @@ impl<'a> Runner<'a> {
 
         // Iterate the nodes in reverse to get liveness ranges for free.
         for (i, node) in nodes.iter().enumerate().rev() {
-            if is_reshape_op(node.op_type()) {
+            if is_reshape_op(node.op_type()) || is_untracked_op(node.op_type()) {
                 continue;
             }
 
@@ -408,6 +397,10 @@ impl<'a> Runner<'a> {
         {
             println!("=== ALLOCATIONS");
             for node in nodes {
+                if is_untracked_op(node.op_type()) {
+                    continue;
+                }
+
                 for (i, output) in node.output.iter().enumerate() {
                     print!(
                         "{}(#{})",
@@ -421,8 +414,18 @@ impl<'a> Runner<'a> {
                         print!(", ");
                     }
                 }
-                print!("\t= {}(", node.name());
-                for (i, input) in node.input.iter().enumerate() {
+                print!("\t= {}[{}](", node.name(), node.op_type());
+                let input_len = if node.op_type() == "Resize" {
+                        1
+                    } else {
+                        node.input.len()
+                    };
+                for (i, input) in node
+                    .input
+                    .iter()
+                    .take(input_len)
+                    .enumerate()
+                {
                     print!(
                         "{}(#{})",
                         input,
@@ -431,7 +434,7 @@ impl<'a> Runner<'a> {
                             None => -1,
                         }
                     );
-                    if i != node.input.len() - 1 {
+                    if i != input_len - 1 {
                         print!(", ");
                     }
                 }

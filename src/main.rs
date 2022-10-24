@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Sub};
 
 use anyhow::{anyhow, Context};
 use protobuf::Message;
 use structopt::StructOpt;
 
 use crate::{
-    compiler::is_reshape_op,
+    compiler::{is_reshape_op, is_untracked_op},
     gpu::{Op, TensorDesc},
     shape::Shape,
     tensor::DataType,
@@ -26,9 +26,14 @@ struct Args {
     #[structopt(default_value = "./sd-v1-5-onnx/vae_decoder_sim.onnx")]
     input_model: std::path::PathBuf,
     dump_folder: Option<std::path::PathBuf>,
+
+    #[structopt(long, short, default_value = "ones")]
+    init: String,
 }
 
 fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let args = Args::from_args();
 
     let dump_folder = args.dump_folder;
@@ -58,7 +63,7 @@ fn main() -> anyhow::Result<()> {
     let dim_mappings = {
         let mut map = std::collections::HashMap::new();
         map.insert(
-            "N",
+            "batch",
             crate::shape::Dimension::Concrete(1),
             //  crate::shape::Dimension::Symbolic(String::from("batch")),
         );
@@ -207,11 +212,11 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
-    println!();
-    println!("valided {}/{}", s, graph.node.len());
+
+    log::info!("valided {}/{}", s, graph.node.len());
 
     if s != graph.node.len() {
-        println!(
+        log::debug!(
             "not in info = {:?}",
             graph.node.iter().find_map(|node| {
                 if !graph.value_info.iter().any(|val| val.name() == node.name()) {
@@ -242,12 +247,25 @@ fn main() -> anyhow::Result<()> {
         let dtype = dtype_inferer.get_type(input.name());
         let shape = shape_inferer.get_shape(input.name());
         let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        let init = "arange";
+
+        let init: &str = &args.init;
+        log::info!("using input \"{init}\"");
+
         let numel = shape.numel().unwrap();
-        let floats: Vec<f32> = if init == "ones" {
-            std::iter::repeat([1.0]).flatten().take(numel).collect()
-        } else {
-            (0..numel).map(|i| i as f32).take(numel).collect()
+        let floats: Vec<f32> = match init {
+            "ones" => std::iter::repeat([1.0]).flatten().take(numel).collect(),
+            "arange" => (0..numel).map(|i| i as f32).take(numel).collect(),
+            _ => {
+                let (read_shape, data) = npy::read_from_file(init)
+                    .with_context(|| anyhow!("when open file {}", init))?;
+                if shape != &read_shape.shape {
+                    anyhow::bail!(
+                        "invalid shape from input file {}, expected {shape}",
+                        read_shape.shape
+                    );
+                }
+                data
+            }
         };
 
         // Some inputs can also be present in initializers, skip those
@@ -272,15 +290,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     for inter in &intermediaries {
-        let dtype = dtype_inferer.get_type(inter);
-        let shape = shape_inferer.get_shape(inter);
-        let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        let is_output = graph
-            .output
-            .iter()
-            .any(|node| node.name() == inter.as_str());
+        if !descs.contains_key(inter.as_str()) {
+            let dtype = dtype_inferer.get_type(inter);
+            let shape = shape_inferer.get_shape(inter);
+            let desc = TensorDesc::new(shape.clone(), dtype.clone());
 
-        if !is_output {
             descs.insert(inter.as_str(), desc);
         }
     }
@@ -288,28 +302,29 @@ fn main() -> anyhow::Result<()> {
         .allocate_tensors(&graph.node, &descs, dump_folder.is_some())
         .with_context(|| anyhow!("when allocating nodes"))?;
 
-    println!(
+    log::info!(
         "total_alloc_size = {}",
         human_bytes::human_bytes(runner.total_allocated_size() as f64)
     );
     // return Ok(());
 
+    log::info!("building ops");
+
     let ops = graph
         .node
         .iter()
-        .filter(|node| !is_reshape_op(node.op_type()))
+        .filter(|node| !is_reshape_op(node.op_type()) && !is_untracked_op(node.op_type()))
         .map(|node| {
             Op::new(
                 &runner.device,
                 node.input
                     .iter()
-                    .filter_map(|input| {
-                        if input.is_empty() {
-                            None
-                        } else {
-                            Some(runner.get_storage(input))
-                        }
+                    .take(if node.op_type() == "Resize" {
+                        1 // These ops are tracked statically so we remove tensor "params"
+                    } else {
+                        node.input.len()
                     })
+                    .map(|input| runner.get_storage(input))
                     .collect::<anyhow::Result<Vec<&gpu::TensorStorage>>>()?,
                 node.output
                     .iter()
@@ -321,11 +336,14 @@ fn main() -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<Vec<Op>>>()?;
 
+    log::info!("submitting ops");
+    let time = std::time::Instant::now();
+
     // We submit things in chunks as it turns out submitting 500+ shaders at once
     // is not really appreciated by the GPU :((
-    let chunk_size = 10;
+    let chunk_size = 60;
 
-    for chunk in ops.chunks(chunk_size) {
+    // for chunk in ops.chunks(chunk_size) {
         let mut encoder = runner
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -336,12 +354,12 @@ fn main() -> anyhow::Result<()> {
                 label: Some("Compute Pass"),
             });
 
-            for op in chunk {
+            for op in &ops {
                 op.run(&mut compute_pass);
             }
         }
         runner.queue.submit(std::iter::once(encoder.finish()));
-    }
+    // }
 
     if let Some(folder) = dump_folder {
         if !folder.exists() {
@@ -361,21 +379,19 @@ fn main() -> anyhow::Result<()> {
         let output = &graph.output[0];
         let tensor = runner.get_storage(output.name())?;
         let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
+
+        let elapsed = std::time::Instant::now().sub(time);
+        log::info!("run done ({:?})", elapsed);
+
         let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 
         let out_shape = &descs[output.name()].shape;
-        npy::save_to_file(
-            &format!("activations/{}.npy", output.name()),
-            tensor_vec,
-            out_shape,
-        )
-        .with_context(|| anyhow!("failed to save to file output.npy"))?;
-
-        for f in tensor_vec.iter().take(20) {
-            print!("{:1.4} ", f);
-        }
-        println!();
+        let filename = format!("activations/{}.npy", output.name());
+        log::info!("saving to file {filename}");
+        npy::save_to_file(&filename, tensor_vec, out_shape)
+            .with_context(|| anyhow!("failed to save to file output.npy"))?;
     }
+    log::info!("done!");
 
     Ok(())
 }

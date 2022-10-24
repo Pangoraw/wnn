@@ -43,11 +43,7 @@ pub(crate) fn save_to_file(filename: &str, data: &[f32], shape: &Shape) -> Resul
     file.write_all(&header_len.to_le_bytes())?; // HEADER_LEN
     file.write_all(&header)?;
 
-    file.write_all(
-        &std::iter::repeat(b' ')
-            .take(padding)
-            .collect::<Vec<u8>>(),
-    )?;
+    file.write_all(&std::iter::repeat(b' ').take(padding).collect::<Vec<u8>>())?;
     let data_slice = bytemuck::cast_slice(data);
     n += data_slice.len();
 
@@ -63,16 +59,16 @@ use nom::bytes::complete::{tag, take, take_until};
 use nom::character::complete::{char, i64 as nom_i64, space0};
 use nom::combinator::opt;
 use nom::multi::separated_list0;
-use nom::number::complete::le_u16;
+use nom::number::complete::{le_u16, u8 as nom_u8};
 use nom::sequence::delimited;
 use nom::IResult;
 
 fn parse_header_len(data: &[u8]) -> IResult<&[u8], u16> {
     let (data, _) = tag(MAGIC_STRING)(data)?;
-    let (data, major) = nom::number::complete::u8(data)?;
+    let (data, major) = nom_u8(data)?;
     assert!(major == 1);
 
-    let (data, minor) = nom::number::complete::u8(data)?;
+    let (data, minor) = nom_u8(data)?;
     assert!(minor == 0);
 
     le_u16(data)
@@ -94,7 +90,7 @@ enum PythonVal {
     IntTuple(Vec<i64>),
 }
 
-fn parse_tuple(val: &str) -> IResult<&str, PythonVal> {
+fn parse_int_tuple(val: &str) -> IResult<&str, PythonVal> {
     let (rest, values) = delimited(
         char('('),
         separated_list0(char(','), delimited(space0, nom_i64, space0)),
@@ -121,7 +117,7 @@ fn parse_string(val: &str) -> IResult<&str, PythonVal> {
 }
 
 fn parse_val(val: &str) -> IResult<&str, PythonVal> {
-    alt((parse_tuple, parse_string, parse_bool))(val)
+    alt((parse_int_tuple, parse_string, parse_bool))(val)
 }
 
 fn parse_key_value(header: &str) -> IResult<&str, (&str, PythonVal)> {
@@ -167,11 +163,11 @@ pub(crate) fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<f32>)> {
 
     let (slice, header) = match extract_header(&content) {
         Ok((slice, header)) => (slice, header),
-        Err(err) => bail!("failed to parser file header: {err}"),
+        Err(_) => bail!("failed to parse file header"),
     };
     let desc = match parse_header(header) {
         Ok((_, desc)) => desc,
-        Err(err) => bail!("failed to parse header: {err}"),
+        Err(_) => bail!("failed to parse header"),
     };
 
     let data = bytemuck::cast_slice(slice).to_owned();

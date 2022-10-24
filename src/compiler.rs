@@ -462,6 +462,12 @@ pub(crate) fn compile_node(
     Ok(invoc)
 }
 
+pub(crate) fn is_untracked_op(op_type: &str) -> bool {
+    matches!(op_type, "Shape")
+}
+
+// We apply a special treatment to these ops since there is no data change
+// to the underlying buffer.
 pub(crate) fn is_reshape_op(op_type: &str) -> bool {
     matches!(
         op_type,

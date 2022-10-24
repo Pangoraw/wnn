@@ -56,7 +56,8 @@ onnx.save(model, './test.onnx')
 onnx_input = model.graph.input[0]
 input_shape = tuple(d.dim_value if d.dim_value != 0 else 1 for d in onnx_input.type.tensor_type.shape.dim)
 
-init = "arange"
+# init = "arange"
+init = "from_file"
 if init == "ones":
     input = np.ones(input_shape, dtype=np.float32)
 elif init == "arange":
@@ -65,6 +66,8 @@ elif init == "arange":
         s *= i
     print(s)
     input = np.arange(s, dtype=np.float32).reshape(input_shape)
+else:
+    input = np.load(Path("~/irisa/diffusers/latents.npy").expanduser())
 
 sess = ort.InferenceSession("./test.onnx")
 ort_outputs = sess.run(names, {onnx_input.name: input}) 
@@ -73,6 +76,7 @@ THRESHOLD = 1e-2
 
 print()
 print("checking equality")
+
 # for (k, a), b in zip(outputs.items(), ort_outputs):
 for i, k in enumerate(names):
     a = outputs[k]

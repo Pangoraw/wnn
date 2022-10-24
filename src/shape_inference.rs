@@ -177,20 +177,16 @@ impl<'a> ShapeInferer<'a> {
                     ),
                 );
 
-                /*
-                if let Some(constants) = node
-                    .input
-                    .iter()
-                    .map(|input| self.constants.get(input.as_str()))
-                    .collect::<Option<Vec<&Shape>>>()
-                {
-                    println!("here we are");
-                    if constants.iter().all(|s| s.is_scalar()) {
-                        dbg!("here we are");
-                    }
-                }*/
-
                 vec![out_shape]
+            }
+            "Squeeze" => {
+                let mut input_shape = self.shapes[node.input[0].as_str()].clone();
+                match node.input[1].as_str() {
+                    "" => {}
+                    other => bail!("unsupported dynamic Squeeze with input {other}"),
+                }
+                input_shape.squeeze();
+                vec![input_shape]
             }
             "Unsqueeze" => {
                 let mut out_shape = self.shapes[node.input[0].as_str()].clone();
@@ -236,10 +232,8 @@ impl<'a> ShapeInferer<'a> {
                             .ok_or_else(|| anyhow!("failed to get shape for input {}", input))
                     })
                     .collect::<anyhow::Result<Vec<&Shape>>>()?;
-                let pads =
-                    get_attr_ints(node, "pads").ok_or_else(|| anyhow!("could not find pads"))?;
-                let strides = get_attr_ints(node, "strides")
-                    .ok_or_else(|| anyhow!("could not find strides"))?;
+                let pads = get_attr_ints(node, "pads").unwrap_or(&[0, 0, 0, 0]);
+                let strides = get_attr_ints(node, "strides").unwrap_or(&[1, 1]);
                 let x = input_shapes[0];
 
                 let kernel_shape = match (op, get_attr_ints(node, "kernel_shape")) {
@@ -275,13 +269,13 @@ impl<'a> ShapeInferer<'a> {
                     (x.concrete_size(2)? - 2 * (kernel_shape[0] as usize / 2)
                         + pads[0] as usize
                         + pads[2] as usize)
-                        / *strides.first().unwrap_or(&1) as usize,
+                        / strides[0] as usize,
                 )); // H
                 out_shape.append_dim(crate::shape::Dimension::Concrete(
                     (x.concrete_size(3)? - 2 * (kernel_shape[1] as usize / 2)
                         + pads[1] as usize
                         + pads[3] as usize)
-                        / *strides.get(1).unwrap_or(&1) as usize,
+                        / strides[1] as usize,
                 )); // W
 
                 vec![out_shape]
