@@ -2,8 +2,6 @@ use std::fmt::Display;
 
 use anyhow::bail;
 
-use crate::onnx;
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum DataType {
     I32,
@@ -20,16 +18,6 @@ impl DataType {
             7 => DataType::I64,
             11 => DataType::F64,
             _ => bail!("unsupported datatype {dtype}"),
-        })
-    }
-
-    pub(crate) fn from_onnx(dtype: onnx::tensor_proto::DataType) -> anyhow::Result<Self> {
-        Ok(match dtype {
-            onnx::tensor_proto::DataType::INT32 => DataType::I32,
-            onnx::tensor_proto::DataType::INT64 => DataType::I64,
-            onnx::tensor_proto::DataType::FLOAT => DataType::F32,
-            onnx::tensor_proto::DataType::DOUBLE => DataType::F64,
-            _ => bail!("unsupported datatype {:?}", dtype),
         })
     }
 

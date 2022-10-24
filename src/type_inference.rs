@@ -30,7 +30,7 @@ impl<'a> TypeInferer<'a> {
                         "value" => Some(DataType::from_int(attr.t.data_type()).unwrap()),
                         _ => None,
                     })
-                    .ok_or_else(|| anyhow!("could not infer type (no attr found)"))?;
+                    .unwrap_or(DataType::F32);
                 vec![dtype]
             }
             "Constant" => {

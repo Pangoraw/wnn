@@ -8,7 +8,8 @@ use crate::utils::*;
 
 pub(crate) struct ShapeInferer<'a> {
     shapes: HashMap<&'a str, Shape>,
-    constants: HashMap<&'a str, Shape>,
+    constants: HashMap<&'a str, Vec<i64>>,
+    known_shapes: HashMap<&'a str, Shape>,
     aliases: HashMap<&'a str, &'a str>,
     graph: &'a onnx::GraphProto,
 }
@@ -18,6 +19,7 @@ impl<'a> ShapeInferer<'a> {
         Self {
             shapes: HashMap::new(),
             constants: HashMap::new(),
+            known_shapes: HashMap::new(),
             aliases: HashMap::new(),
             graph,
         }
@@ -97,7 +99,7 @@ impl<'a> ShapeInferer<'a> {
                 }
                 vec![out_dim]
             }
-            "Mul" | "Add" | "Div" | "Sub" => {
+            op @ ("Mul" | "Add" | "Div" | "Sub") => {
                 let input_shapes = node
                     .input
                     .iter()
@@ -110,6 +112,24 @@ impl<'a> ShapeInferer<'a> {
 
                 let mut a = input_shapes[0].clone();
                 let mut b = input_shapes[1].clone();
+
+                if let (Some(a), Some(b)) = (
+                    self.find_constant(node.input[0].as_str()),
+                    self.find_constant(node.input[1].as_str()),
+                ) {
+                    let c = a
+                        .iter()
+                        .zip(b)
+                        .map(|(a, b)| match op {
+                            "Mul" => a * b,
+                            "Add" => a + b,
+                            "Sub" => a - b,
+                            "Div" => a / b,
+                            _ => 0,
+                        })
+                        .collect();
+                    self.constants.insert(node.output[0].as_str(), c);
+                }
 
                 let out_shape = if a.is_scalar() {
                     b
@@ -163,6 +183,24 @@ impl<'a> ShapeInferer<'a> {
                             .ok_or_else(|| anyhow!("failed to get shape for input {}", input))
                     })
                     .collect::<anyhow::Result<Vec<&Shape>>>()?;
+
+                if input_shapes.iter().all(|shape| shape.ndims() == 1) {
+                    let new_constant = node
+                        .input
+                        .iter()
+                        .map(|input| {
+                            self.find_constant(input)
+                                .map(|s| s.to_owned())
+                                .ok_or_else(|| anyhow!("could not find constant for {input}"))
+                        })
+                        .collect::<anyhow::Result<Vec<Vec<i64>>>>()?
+                        .iter()
+                        .flatten()
+                        .map(|x| *x)
+                        .collect::<Vec<i64>>(); // Phew...
+                    self.constants.insert(node.output[0].as_str(), new_constant);
+                }
+
                 let axis = get_attr_int(node, "axis").ok_or_else(|| anyhow!("no axis provided"))?;
                 let mut out_shape = input_shapes[0].clone();
                 out_shape.set_dim(
@@ -193,6 +231,13 @@ impl<'a> ShapeInferer<'a> {
                 let axes = self
                     .find_stored_shape(&node.input[1])
                     .ok_or_else(|| anyhow!("failed to find shape for tensor {}", node.input[1]))?;
+
+                match self.find_stored_shape(node.input[0].as_str()) {
+                    Some(s) if s.is_scalar() => {
+                      dbg!(self.find_constant(node.input[0].as_str()).unwrap());
+                    }
+                    _ => {}
+                }
 
                 for dim in 0isize..axes.ndims() as isize {
                     out_shape.unsqueeze(axes.as_int(dim)? as usize);
@@ -320,6 +365,20 @@ impl<'a> ShapeInferer<'a> {
                                 node.input[0]
                             )
                         })?;
+
+                if output_shape.ndims() == 1 {
+                    match node.attribute.iter().find(|attr| attr.name() == "value") {
+                        Some(attr) if attr.t.data_type() == 7 => {
+                            let data = int_slice_from_tensor(&attr.t);
+                            let data = std::iter::repeat(data[0])
+                                .take(output_shape.numel().unwrap())
+                                .collect();
+                            self.constants.insert(node.output[0].as_str(), data);
+                        }
+                        _ => {}
+                    }
+                }
+
                 vec![output_shape]
             }
             "Constant" => {
@@ -335,7 +394,7 @@ impl<'a> ShapeInferer<'a> {
                             if attr.t.data_type() == 7 {
                                 self.constants.insert(
                                     node.output[0].as_str(),
-                                    Shape::from(int_slice_from_tensor(&attr.t)),
+                                    int_slice_from_tensor(&attr.t).to_vec(),
                                 );
                             }
                         }
@@ -355,7 +414,7 @@ impl<'a> ShapeInferer<'a> {
             "Shape" => {
                 assert!(node.input.len() == 1);
                 let input_shape = &self.shapes[node.input[0].as_str()];
-                self.constants
+                self.known_shapes
                     .insert(node.output[0].as_str(), input_shape.clone());
                 vec![Shape::from(&[input_shape.ndims() as _])]
             }
@@ -375,16 +434,90 @@ impl<'a> ShapeInferer<'a> {
             | "Relu"
             | "Sigmoid"
             | "Softmax"
-            | "Tanh" => {
+            | "Tanh"
+            | "Sin"
+            | "Cos" => {
                 vec![self.shapes[node.input[0].as_str()].clone()]
+            }
+            "Slice" => {
+                let x = &self.shapes[node.input[0].as_str()];
+                let r = x.ndims() as i64;
+
+                let range: Vec<i64> = (0..x.ndims() as i64).collect();
+                let axes: Vec<i64> = self
+                    .find_constant(node.input[3].as_str())
+                    .unwrap_or(&range)
+                    .iter()
+                    .map(|ax| if *ax < 0 { *ax + r } else { *ax })
+                    .collect();
+
+                let starts = self
+                    .find_constant(node.input[1].as_str())
+                    .ok_or_else(|| anyhow!("could not find steps {}", node.output[1]))?;
+                let ends = self
+                    .find_constant(node.input[2].as_str())
+                    .ok_or_else(|| anyhow!("could not find steps {}", node.output[2]))?;
+                let steps = self
+                    .find_constant(node.input[3].as_str())
+                    .ok_or_else(|| anyhow!("could not find steps {}", node.output[3]))?;
+
+                dbg!(&axes, starts, ends, steps);
+
+                let mut out = Shape::empty();
+
+                for dim in 0isize..x.ndims() as isize {
+                    if let Some(i) = axes.iter().enumerate().find_map(|(i, ax_dim)| {
+                        if &(dim as i64) == ax_dim {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    }) {
+                        let start = starts[i];
+                        let end = ends[i];
+                        let steps = steps[i];
+
+                        let elems_along_dim =
+                            (end.clamp(0, x.concrete_size(dim)? as i64) - start) / steps;
+                        out.append_dim(crate::shape::Dimension::Concrete(elems_along_dim as usize));
+                    } else {
+                        out.append_dim(x.size(dim).clone());
+                    }
+                }
+
+                vec![out]
             }
             "Where" => {
                 let a = &self.shapes[node.input[0].as_str()];
                 let b = &self.shapes[node.input[1].as_str()];
                 let c = &self.shapes[node.input[2].as_str()];
+
+                if let (Some(a), Some(b), Some(c)) = (
+                    self.find_constant(node.input[0].as_str()),
+                    self.find_constant(node.input[1].as_str()),
+                    self.find_constant(node.input[2].as_str()),
+                ) {
+                    let d = a
+                        .iter()
+                        .zip(std::iter::zip(b, c))
+                        .map(|(a, (b, c))| if *a == 1 { *b } else { *c })
+                        .collect();
+                    self.constants.insert(node.output[0].as_str(), d);
+                } else {
+                    log::debug!(
+                        "nope :'( {:?}",
+                        (
+                            self.find_constant(node.input[0].as_str()).is_some(),
+                            self.find_constant(node.input[1].as_str()).is_some(),
+                            self.find_constant(node.input[2].as_str()).is_some(),
+                        )
+                    );
+                }
+
                 if a != b || b != c {
                     bail!("invalid Where({}, {}, {})", a, b, c);
                 }
+
                 vec![a.clone()]
             }
             "Equal" => {
@@ -393,23 +526,52 @@ impl<'a> ShapeInferer<'a> {
                 if a != b {
                     bail!("invalid Equal {} == {}", a, b);
                 }
+
+                if let (Some(a), Some(b)) = (
+                    self.find_constant(node.input[0].as_str()),
+                    self.find_constant(node.input[1].as_str()),
+                ) {
+                    let out = a
+                        .iter()
+                        .zip(b)
+                        .map(|(a, b)| if a == b { 1 } else { 0 })
+                        .collect();
+                    self.constants.insert(node.output[0].as_str(), out);
+                } else {
+                    log::debug!(
+                        "nope :'( {:?}",
+                        (
+                            self.find_constant(node.input[0].as_str()).is_some(),
+                            self.find_constant(node.input[1].as_str()).is_some(),
+                        )
+                    );
+                }
+
                 vec![a.clone()]
             }
             "Identity" => {
                 let input_shape = self.shapes[node.input[0].as_str()].clone();
+
                 if let Some(val) = self.constants.get(node.input[0].as_str()) {
-                    self.constants.insert(node.output[0].as_str(), val.clone());
-                } else if input_shape.ndims() == 1 {
-                    if let Ok(shape_to_insert) = self
+                    self.constants.insert(node.input[0].as_str(), val.clone());
+                }
+
+                if let Some(val) = self.known_shapes.get(node.input[0].as_str()) {
+                    self.known_shapes
+                        .insert(node.output[0].as_str(), val.clone());
+                }
+
+                if input_shape.ndims() == 1 {
+                    if let Ok(slice_to_insert) = self
                         .graph
                         .initializer
                         .iter()
                         .find(|init| init.data_type() == 7 && init.name() == node.input[0])
-                        .map(|tensor| Shape::from(int_slice_from_tensor(tensor)))
+                        .map(|tensor| int_slice_from_tensor(tensor))
                         .ok_or_else(|| anyhow!("failed to find shape for tensor {}", node.input[0]))
                     {
                         self.constants
-                            .insert(node.output[0].as_str(), shape_to_insert);
+                            .insert(node.output[0].as_str(), slice_to_insert.to_vec());
                     }
                 }
 
@@ -425,19 +587,22 @@ impl<'a> ShapeInferer<'a> {
         Ok(out)
     }
 
-    fn find_stored_shape(&self, node: &str) -> Option<Shape> {
+    fn find_constant(&self, node: &str) -> Option<&[i64]> {
         match self.constants.get(node) {
-            Some(s) => Some(s.clone()),
+            Some(s) => Some(&s),
             None => self
                 .graph
                 .initializer
                 .iter()
                 .find(|init| init.data_type() == 7 && init.name() == node)
-                .map(|tensor| {
-                    let shape = Shape::from(int_slice_from_tensor(tensor));
-                    assert!(tensor.dims.len() == 1 && shape.ndims() == tensor.dims[0] as usize);
-                    shape
-                }),
+                .map(|tensor| int_slice_from_tensor(tensor)),
+        }
+    }
+
+    fn find_stored_shape(&self, node: &str) -> Option<Shape> {
+        match self.known_shapes.get(node) {
+            Some(s) => Some(s.clone()),
+            None => self.find_constant(node).map(|s| Shape::from(s)),
         }
     }
 

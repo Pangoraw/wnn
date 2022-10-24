@@ -94,9 +94,11 @@ fn main() -> anyhow::Result<()> {
                 })?;
             Shape::from_tensor_shape_with_maps(tensor_shape, &dim_mappings)
         };
+        println!("{}{}::{}", input.name(), &shape, &dtype);
         dtype_inferer.init(input.name(), dtype);
         shape_inferer.init(input.name(), shape);
     }
+    println!("======");
 
     let mut intermediaries = Vec::new();
     for node in &graph.node {
@@ -107,7 +109,7 @@ fn main() -> anyhow::Result<()> {
                 node.op_type(),
                 node.input
                     .iter()
-                    .map(|input| shape_inferer.get_shape(input).to_string())
+                    .map(|input| format!("{}{}", input, shape_inferer.get_shape(input)))
                     .collect::<Vec<String>>()
                     .join(", "),
             )
@@ -119,7 +121,7 @@ fn main() -> anyhow::Result<()> {
                 node.op_type(),
                 node.input
                     .iter()
-                    .map(|input| shape_inferer.get_shape(input).to_string())
+                    .map(|input| format!("{}{}", input, shape_inferer.get_shape(input)))
                     .collect::<Vec<String>>()
                     .join(", "),
             )
@@ -343,7 +345,7 @@ fn main() -> anyhow::Result<()> {
     // is not really appreciated by the GPU :((
     let chunk_size = 60;
 
-    // for chunk in ops.chunks(chunk_size) {
+    for chunk in ops.chunks(chunk_size) {
         let mut encoder = runner
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -354,12 +356,12 @@ fn main() -> anyhow::Result<()> {
                 label: Some("Compute Pass"),
             });
 
-            for op in &ops {
+            for op in chunk {
                 op.run(&mut compute_pass);
             }
         }
         runner.queue.submit(std::iter::once(encoder.finish()));
-    // }
+    }
 
     if let Some(folder) = dump_folder {
         if !folder.exists() {

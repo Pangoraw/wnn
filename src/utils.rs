@@ -32,7 +32,7 @@ pub(crate) fn get_attr_string<'a>(node: &'a onnx::NodeProto, name: &str) -> Opti
     })
 }
 
-pub(crate) fn external_data(tensor: &onnx::TensorProto) {
+pub(crate) fn _external_data(tensor: &onnx::TensorProto) {
     if matches!(
         tensor.data_location(),
         onnx::tensor_proto::DataLocation::EXTERNAL
