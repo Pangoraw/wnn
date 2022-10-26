@@ -1,22 +1,24 @@
 // The code for this kernel is heavily inspired by the code for webonnx/wonnx
 // https://github.com/webonnx/wonnx/blob/master/wonnx/templates/pool/conv.wgsl
 // TODO: Support dilation
+type T = {{ scalar }};
+
 
 @group(0) @binding(0)
-var<storage, read> input: array<f32>;
+var<storage, read> input: array<T>;
 
 @group(0) @binding(1)
-var<storage, read> weight: array<f32>;
+var<storage, read> weight: array<T>;
 
 {% if i_lens | length == 3 %}
     @group(0) @binding(2)
-    var<storage, read> bias: array<f32>;
+    var<storage, read> bias: array<T>;
 
     @group(0) @binding(3)
-    var<storage, read_write> output: array<f32>;
+    var<storage, read_write> output: array<T>;
 {% else %}
     @group(0) @binding(2)
-    var<storage, read_write> output: array<f32>;
+    var<storage, read_write> output: array<T>;
 {% endif %}
 
 @compute @workgroup_size({{ workgroup_x }})
@@ -42,7 +44,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let root_input_index = b * {{ i_strides[0][0] }}u;
     let root_weight_index = out_chan * {{ i_strides[1][0] }}u;
 
-    var tmpsum: f32 = {% if i_lens | length == 3 %}bias[out_chan]{% else %}0.{% endif %};
+    var tmpsum: T = {% if i_lens | length == 3 %}bias[out_chan]{% else %}0.{% endif %};
     for (var input_chan: u32 = 0u; input_chan < {{ i_sizes[0][1] }}u; input_chan = input_chan + 1u) {
         let base_input_index =
             root_input_index

@@ -89,6 +89,7 @@ fn compute_strides(descs: &TensorDescs, names: &[String]) -> anyhow::Result<Vec<
 
 fn base_context(node: &onnx::NodeProto, descs: &TensorDescs) -> anyhow::Result<tera::Context> {
     let mut context = tera::Context::new();
+    context.insert("scalar", "f32");
     context.insert("i_length", &node.input.len());
     context.insert("o_length", &node.output.len());
     context.insert(

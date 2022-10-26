@@ -210,6 +210,7 @@ impl<'a> Runner<'a> {
     /// Performs tensor allocation by grouping allocations of the same size together.
     /// NOTE: We can probably do better by using bigger buffers to host smaller buffers.
     ///       but this seems good enough for models where the same activation size can often be seen.
+    /// TODO: put inits, inputs and output buffers inside the allocation line too?
     pub(crate) fn allocate_tensors(
         &mut self,
         nodes: &'a [onnx::NodeProto],
@@ -312,6 +313,7 @@ impl<'a> Runner<'a> {
         }
 
         // Iterate the nodes in reverse to get liveness ranges for free.
+        // See https://www.mattkeeter.com/blog/2022-10-04-ssra/ for more details.
         for (i, node) in nodes.iter().enumerate().rev() {
             if is_reshape_op(node.op_type()) || is_untracked_op(node.op_type()) {
                 continue;

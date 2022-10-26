@@ -1,8 +1,10 @@
+type T = {{ scalar }};
+
 @group(0) @binding(0)
-var<storage, read> input: array<f32>;
+var<storage, read> input: array<T>;
 
 @group(0) @binding(1)
-var<storage, read_write> output: array<f32>;
+var<storage, read_write> output: array<T>;
 
 @compute @workgroup_size({{ workgroup_x }})
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -22,7 +24,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         root_input_index
         + out_chan * {{ i_strides[0][1] }}u;
 
-    var sum: f32 = 0.;
+    var sum = T();
     for (var i: u32 = 0u; i < {{ i_sizes[0][3] }}u; i = i + 1u) {
         for (var j: u32 = 0u; j < {{ i_sizes[0][2] }}u; j = j + 1u) {
             let input_idx = base_input_index + j * {{ i_strides[0][2] }}u + i * {{ i_strides[0][3] }}u;

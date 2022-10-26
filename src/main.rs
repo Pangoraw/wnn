@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
     let dim_mappings = {
         let mut map = std::collections::HashMap::new();
         map.insert(
-            "batch",
+            "N",
             crate::shape::Dimension::Concrete(1),
             //  crate::shape::Dimension::Symbolic(String::from("batch")),
         );

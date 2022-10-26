@@ -1,11 +1,13 @@
+type T = {{ scalar }};
+
 @group(0) @binding(0)
-var<storage, read> input_left: array<f32>;
+var<storage, read> input_left: array<T>;
 
 @group(0) @binding(1)
-var<storage, read> input_right: array<f32>;
+var<storage, read> input_right: array<T>;
 
 @group(0) @binding(2)
-var<storage, read_write> output: array<f32>;
+var<storage, read_write> output: array<T>;
 
 @compute @workgroup_size({{ workgroup_x }})
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {

@@ -1,14 +1,16 @@
+type T = {{ scalar }};
+
 @group(0) @binding(0)
-var<storage, read> input: array<f32>;
+var<storage, read> input: array<T>;
 
 @group(0) @binding(1)
-var<storage, read> scale: array<f32>;
+var<storage, read> scale: array<T>;
 
 @group(0) @binding(2)
-var<storage, read> bias: array<f32>;
+var<storage, read> bias: array<T>;
 
 @group(0) @binding(3)
-var<storage, read_write> output: array<f32>;
+var<storage, read_write> output: array<T>;
 
 @compute @workgroup_size(1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -17,8 +19,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let start = gidx * {{ i_strides[0][0] }}u + gidy * {{ i_strides[0][1] }}u;
 
-    var sum: f32 = 0.;
-    var sum2: f32 = 0.;
+    var sum: T = T();
+    var sum2: T = T();
     for (var k: u32 = 0u; k < {{ i_strides[0][1] }}u; k = k + 1u) {
         let element = input[start + k];
         sum += element;
