@@ -60,18 +60,14 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("while opening file {}", filename.display()))?;
     let model = onnx::ModelProto::parse_from_reader(&mut onnx_file)?;
 
-    let dim_mappings = {
-        let mut map = std::collections::HashMap::new();
-        map.insert(
-            "N",
-            crate::shape::Dimension::Concrete(1),
-            //  crate::shape::Dimension::Symbolic(String::from("batch")),
-        );
-        map.insert("channels", crate::shape::Dimension::Concrete(4));
-        map.insert("height", crate::shape::Dimension::Concrete(64));
-        map.insert("width", crate::shape::Dimension::Concrete(64));
-        map
-    };
+    // Concretize common dimensions
+    let dim_mappings = HashMap::from_iter([
+        ("N", shape::Dimension::Concrete(1)),
+        ("batch", shape::Dimension::Concrete(1)),
+        ("channels", shape::Dimension::Concrete(4)),
+        ("height", shape::Dimension::Concrete(64)),
+        ("width", shape::Dimension::Concrete(64)),
+    ]);
 
     let graph = model.graph;
     let mut shape_inferer = shape_inference::ShapeInferer::new(&graph);
@@ -343,7 +339,7 @@ fn main() -> anyhow::Result<()> {
 
     // We submit things in chunks as it turns out submitting 500+ shaders at once
     // is not really appreciated by the GPU :((
-    let chunk_size = 60;
+    let chunk_size = 10;
 
     for chunk in ops.chunks(chunk_size) {
         let mut encoder = runner

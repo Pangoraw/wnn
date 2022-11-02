@@ -196,7 +196,7 @@ impl<'a> ShapeInferer<'a> {
                         .collect::<anyhow::Result<Vec<Vec<i64>>>>()?
                         .iter()
                         .flatten()
-                        .map(|x| *x)
+                        .copied()
                         .collect::<Vec<i64>>(); // Phew...
                     self.constants.insert(node.output[0].as_str(), new_constant);
                 }
@@ -567,7 +567,7 @@ impl<'a> ShapeInferer<'a> {
                         .initializer
                         .iter()
                         .find(|init| init.data_type() == 7 && init.name() == node.input[0])
-                        .map(|tensor| int_slice_from_tensor(tensor))
+                        .map(int_slice_from_tensor)
                         .ok_or_else(|| anyhow!("failed to find shape for tensor {}", node.input[0]))
                     {
                         self.constants
@@ -589,20 +589,20 @@ impl<'a> ShapeInferer<'a> {
 
     fn find_constant(&self, node: &str) -> Option<&[i64]> {
         match self.constants.get(node) {
-            Some(s) => Some(&s),
+            Some(s) => Some(s),
             None => self
                 .graph
                 .initializer
                 .iter()
                 .find(|init| init.data_type() == 7 && init.name() == node)
-                .map(|tensor| int_slice_from_tensor(tensor)),
+                .map(int_slice_from_tensor),
         }
     }
 
     fn find_stored_shape(&self, node: &str) -> Option<Shape> {
         match self.known_shapes.get(node) {
             Some(s) => Some(s.clone()),
-            None => self.find_constant(node).map(|s| Shape::from(s)),
+            None => self.find_constant(node).map(Shape::from),
         }
     }
 

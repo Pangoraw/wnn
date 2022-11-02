@@ -36,7 +36,7 @@ impl TensorStorage {
         self.buffer.size()
     }
 
-    pub(crate) fn new(
+    fn new(
         device: &wgpu::Device,
         desc: TensorDesc,
         label: Option<&str>,
@@ -57,7 +57,7 @@ impl TensorStorage {
         Self { desc, buffer }
     }
 
-    pub(crate) fn new_with_init(
+    fn new_with_init(
         device: &wgpu::Device,
         data: &[u8],
         desc: TensorDesc,
@@ -176,6 +176,10 @@ impl<'a> Runner<'a> {
             })
             .await
             .ok_or_else(|| anyhow!("failed to request adapter"))?;
+
+        let info = adapter.get_info();
+        log::info!("adapter: {}", info.name);
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -418,16 +422,11 @@ impl<'a> Runner<'a> {
                 }
                 print!("\t= {}[{}](", node.name(), node.op_type());
                 let input_len = if node.op_type() == "Resize" {
-                        1
-                    } else {
-                        node.input.len()
-                    };
-                for (i, input) in node
-                    .input
-                    .iter()
-                    .take(input_len)
-                    .enumerate()
-                {
+                    1
+                } else {
+                    node.input.len()
+                };
+                for (i, input) in node.input.iter().take(input_len).enumerate() {
                     print!(
                         "{}(#{})",
                         input,
@@ -479,6 +478,8 @@ impl<'a> Runner<'a> {
     ) -> anyhow::Result<()> {
         let raw_data = if matches!(desc.dtype, DataType::F32) && !tensor.float_data.is_empty() {
             bytemuck::cast_slice(&tensor.float_data)
+        } else if matches!(desc.dtype, DataType::F64) && !tensor.double_data.is_empty() {
+            bytemuck::cast_slice(&tensor.double_data)
         } else if matches!(desc.dtype, DataType::I64) && !tensor.int64_data.is_empty() {
             bytemuck::cast_slice(&tensor.int64_data)
         } else {
@@ -502,10 +503,10 @@ impl<'a> Runner<'a> {
                 desc.dtype,
             );
         }
-        let storage = TensorStorage::new_with_init(&self.device, raw_data, desc, Some(name));
         if self.tensors.contains_key(name) {
-            anyhow::bail!("tensor {} was already inserted in runner", name);
+            bail!("tensor {} was already inserted in runner", name);
         }
+        let storage = TensorStorage::new_with_init(&self.device, raw_data, desc, Some(name));
         self.tensors.insert(name, storage);
         Ok(())
     }

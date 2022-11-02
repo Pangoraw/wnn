@@ -32,17 +32,20 @@ impl DataType {
             DataType::F64 => std::mem::size_of::<f64>(),
         }
     }
-}
 
-impl Display for DataType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let str = match self {
+    pub(crate) fn to_str(&self) -> &'static str {
+        match self {
             DataType::I32 => "i32",
             DataType::I64 => "i64",
             DataType::F16 => "f16",
             DataType::F32 => "f32",
             DataType::F64 => "f64",
-        };
-        f.write_str(str)
+        }
+    }
+}
+
+impl Display for DataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_str())
     }
 }

@@ -8,6 +8,7 @@ use lazy_static::lazy_static;
 use crate::{
     gpu::TensorDesc,
     onnx,
+    tensor::DataType,
     utils::{get_attr_float, get_attr_int, get_attr_ints, get_attr_string},
 };
 
@@ -49,7 +50,7 @@ impl ShaderInvocation {
     pub(crate) fn to_wgsl(&self) -> anyhow::Result<String> {
         let template = SHADER_FILES
             .get(&self.file_name)
-            .ok_or_else(|| anyhow!("invalid template {}", self.file_name))?;
+            .ok_or_else(|| anyhow!("invalid shader template '{}'", self.file_name))?;
         Ok(tera::Tera::one_off(template, &self.context, false)?)
     }
 
@@ -275,7 +276,27 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        act @ ("Relu" | "Sigmoid") => {
+        "Cast" => {
+            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
+
+            let target_type = DataType::from_int(
+                get_attr_int(node, "to")
+                    .ok_or_else(|| anyhow!("could not find attribute 'to' in Cast"))?
+                    as i32,
+            )?;
+
+            let target_type = target_type.to_str();
+            context.insert("scalar_output", target_type);
+            context.insert("activation", &format!("{}(x)", target_type));
+
+            ShaderInvocation {
+                file_name: "activation",
+                context,
+                dispatch: (dispatch_x as _, 1, 1),
+            }
+        }
+        act @ ("Cos" | "Sin" | "Relu" | "Sigmoid") => {
             let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
@@ -285,6 +306,8 @@ pub(crate) fn compile_node(
                     // f(x) =
                     "Relu" => "max(x, 0.)",
                     "Sigmoid" => "1. / (1. + exp(-x))",
+                    "Cos" => "cos(x)",
+                    "Sin" => "sin(x)",
                     _ => unreachable!(),
                 },
             );

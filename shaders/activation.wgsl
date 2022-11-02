@@ -1,10 +1,11 @@
 type T = {{ scalar }};
+type T2 = {% if scalar_output %}{{ scalar_output }}{% else %}{{ scalar }}{% endif %};
 
 @group(0) @binding(0)
 var<storage, read> input: array<T>;
 
 @group(0) @binding(1)
-var<storage, read_write> output: array<T>;
+var<storage, read_write> output: array<T2>;
 
 @compute @workgroup_size({{ workgroup_x }})
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
