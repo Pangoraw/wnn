@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context};
 use wgpu::util::DeviceExt;
 
 use crate::{
-    compiler::{compile_node, is_reshape_op, is_untracked_op, effective_inputs},
+    compiler::{compile_node, effective_inputs, is_reshape_op, is_untracked_op},
     onnx,
     shape::Shape,
     tensor::DataType,
@@ -121,17 +121,25 @@ impl Op {
         // println!("{shader_source}");
 
         let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&format!("Shader {}", node.name())),
+            label: Some(&format!("Shader {}[{}]", node.name(), node.op_type())),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(shader_source)),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(&format!("Compute Pipeline {}", node.name())),
+            label: Some(&format!(
+                "Compute Pipeline {}[{}]",
+                node.name(),
+                node.op_type()
+            )),
             layout: None,
             module: &kernel,
             entry_point: "main",
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(&format!("Bind Group Compute {}", node.name())),
+            label: Some(&format!(
+                "Bind Group Compute {}[{}]",
+                node.name(),
+                node.op_type()
+            )),
             entries: &inputs
                 .iter()
                 .chain(&outputs)
@@ -334,9 +342,11 @@ impl<'a> Runner<'a> {
                 continue;
             }
 
-            for input in node.input.iter().map(|input| match aliases.get(input) {
-                Some(output) => output,
-                None => input,
+            for input in node.input.iter().take(effective_inputs(node)).map(|input| {
+                match aliases.get(input) {
+                    Some(output) => output,
+                    None => input,
+                }
             }) {
                 if self.tensors.contains_key(input.as_str()) || !descs.contains_key(input.as_str())
                 {
@@ -487,14 +497,17 @@ impl<'a> Runner<'a> {
         tensor: &'a onnx::TensorProto,
         desc: TensorDesc,
     ) -> anyhow::Result<()> {
-        let raw_data = if matches!(desc.dtype, DataType::F32) && !tensor.float_data.is_empty() {
-            bytemuck::cast_slice(&tensor.float_data)
-        } else if matches!(desc.dtype, DataType::F64) && !tensor.double_data.is_empty() {
-            bytemuck::cast_slice(&tensor.double_data)
-        } else if matches!(desc.dtype, DataType::I64) && !tensor.int64_data.is_empty() {
-            bytemuck::cast_slice(&tensor.int64_data)
-        } else {
-            tensor.raw_data()
+        let raw_data = match desc.dtype {
+            DataType::F32 if !tensor.float_data.is_empty() => {
+                bytemuck::cast_slice(&tensor.float_data)
+            }
+            DataType::I64 if !tensor.int64_data.is_empty() => {
+                bytemuck::cast_slice(&tensor.int64_data)
+            }
+            DataType::F64 if !tensor.double_data.is_empty() => {
+                bytemuck::cast_slice(&tensor.double_data)
+            }
+            _ => tensor.raw_data(),
         };
         self.add_node_with_init(tensor.name(), desc, raw_data)
     }

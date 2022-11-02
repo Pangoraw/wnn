@@ -261,7 +261,7 @@ impl Display for Shape {
                 Dimension::Map => f.write_str("0")?,
                 Dimension::Rest => f.write_str("-1")?,
             };
-            if i != self.dims.len() - 1 {
+            if self.ndims() == 1 || i != self.dims.len() - 1 {
                 f.write_str(",")?;
             }
         }

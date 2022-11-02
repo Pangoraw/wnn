@@ -156,7 +156,7 @@ fn parse_header(header: &str) -> IResult<&str, TensorDesc> {
     delimited(char('{'), parse_key_values, char('}'))(header)
 }
 
-pub(crate) fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<f32>)> {
+pub(crate) fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<u8>)> {
     let mut file = std::fs::OpenOptions::new().read(true).open(filename)?;
     let mut content = Vec::new();
     file.read_to_end(&mut content)?;
@@ -170,7 +170,7 @@ pub(crate) fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<f32>)> {
         Err(_) => bail!("failed to parse header"),
     };
 
-    let data = bytemuck::cast_slice(slice).to_owned();
+    let data = slice.to_vec();
     assert!(data.len() == desc.shape.numel().unwrap());
 
     Ok((desc, data))

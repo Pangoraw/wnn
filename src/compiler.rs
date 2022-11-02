@@ -17,6 +17,7 @@ lazy_static! {
         ("matmul", include_str!("../shaders/matmul.wgsl")),
         ("activation", include_str!("../shaders/activation.wgsl")),
         ("conv", include_str!("../shaders/conv.wgsl")),
+        ("concat", include_str!("../shaders/concat.wgsl")),
         ("maxpool", include_str!("../shaders/maxpool.wgsl")),
         ("transpose", include_str!("../shaders/transpose.wgsl")),
         ("broadcast", include_str!("../shaders/broadcast.wgsl")),
@@ -281,6 +282,26 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
+        "Concat" => {
+            let out_shape = &descs[node.output[0].as_str()].shape;
+            let n_invocs = out_shape
+                .numel()
+                .ok_or_else(|| anyhow!("could not get concrete shape for {}", node.output[0]))?;
+
+            let (workgroup_x, dispatch_x, num_groups) = dispatch_invocations(n_invocs as u64);
+            context.insert("workgroup_x", &workgroup_x);
+            context.insert("num_groups", &num_groups);
+
+            let axis = get_attr_int(node, "axis").ok_or_else(|| anyhow!("could not get axis"))?;
+            let axis = out_shape.reldim(axis as isize);
+            context.insert("axis", &axis);
+
+            ShaderInvocation {
+                file_name: "concat",
+                context,
+                dispatch: (dispatch_x as _, 1, 1),
+            }
+        }
         "Cast" => {
             let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
@@ -301,18 +322,22 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        act @ ("Cos" | "Sin" | "Relu" | "Sigmoid") => {
+        act @ ("Cos" | "Sin" | "Relu" | "LeakyRelu" | "Sigmoid") => {
             let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             context.insert(
                 "activation",
-                match act {
+                &match act {
                     // f(x) =
-                    "Relu" => "max(x, 0.)",
-                    "Sigmoid" => "1. / (1. + exp(-x))",
-                    "Cos" => "cos(x)",
-                    "Sin" => "sin(x)",
+                    "Relu" => String::from("max(x, 0.)"),
+                    "LeakyRelu" => {
+                        let alpha = get_attr_float(node, "alpha").unwrap_or(0.01);
+                        format!("{alpha} * x")
+                    }
+                    "Sigmoid" => String::from("1. / (1. + exp(-x))"),
+                    "Cos" => String::from("cos(x)"),
+                    "Sin" => String::from("sin(x)"),
                     _ => unreachable!(),
                 },
             );
@@ -500,7 +525,7 @@ pub(crate) fn effective_inputs(node: &NodeProto) -> usize {
 }
 
 pub(crate) fn is_untracked_op(op_type: &str) -> bool {
-    matches!(op_type, "Shape")
+    matches!(op_type, "Shape" | "Constant")
 }
 
 // We apply a special treatment to these ops since there is no data change

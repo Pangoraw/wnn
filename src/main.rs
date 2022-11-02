@@ -251,9 +251,35 @@ fn main() -> anyhow::Result<()> {
         log::info!("using input \"{init}\"");
 
         let numel = shape.numel().unwrap();
-        let floats: Vec<f32> = match init {
-            "ones" => std::iter::repeat([1.0]).flatten().take(numel).collect(),
-            "arange" => (0..numel).map(|i| i as f32).take(numel).collect(),
+        let floats: Vec<u8> = match (init, dtype) {
+            ("ones", DataType::F32) => bytemuck::cast_slice(
+                &std::iter::repeat([1.0])
+                    .flatten()
+                    .take(numel)
+                    .collect::<Vec<f32>>(),
+            )
+            .to_vec(),
+            ("ones", DataType::F64) => bytemuck::cast_slice(
+                &std::iter::repeat([1.0])
+                    .flatten()
+                    .take(numel)
+                    .collect::<Vec<f64>>(),
+            )
+            .to_vec(),
+            ("arange", DataType::F32) => bytemuck::cast_slice(
+                &(0..numel)
+                    .map(|i| i as f32)
+                    .take(numel)
+                    .collect::<Vec<f32>>(),
+            )
+            .to_vec(),
+            ("arange", DataType::F64) => bytemuck::cast_slice(
+                &(0..numel)
+                    .map(|i| i as f64)
+                    .take(numel)
+                    .collect::<Vec<f64>>(),
+            )
+            .to_vec(),
             _ => {
                 let (read_shape, data) = npy::read_from_file(init)
                     .with_context(|| anyhow!("when open file {}", init))?;
@@ -289,14 +315,15 @@ fn main() -> anyhow::Result<()> {
     }
 
     for inter in &intermediaries {
-        if !descs.contains_key(inter.as_str()) {
-            let dtype = dtype_inferer.get_type(inter);
-            let shape = shape_inferer.get_shape(inter);
-            let desc = TensorDesc::new(shape.clone(), dtype.clone());
-
-            descs.insert(inter.as_str(), desc);
+        if descs.contains_key(inter.as_str()) {
+            continue;
         }
+        let dtype = dtype_inferer.get_type(inter);
+        let shape = shape_inferer.get_shape(inter);
+        let desc = TensorDesc::new(shape.clone(), dtype.clone());
+        descs.insert(inter.as_str(), desc);
     }
+
     runner
         .allocate_tensors(&graph.node, &descs, dump_folder.is_some())
         .with_context(|| anyhow!("when allocating nodes"))?;

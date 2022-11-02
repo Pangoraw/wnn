@@ -234,7 +234,7 @@ impl<'a> ShapeInferer<'a> {
 
                 match self.find_stored_shape(node.input[0].as_str()) {
                     Some(s) if s.is_scalar() => {
-                      dbg!(self.find_constant(node.input[0].as_str()).unwrap());
+                        dbg!(self.find_constant(node.input[0].as_str()).unwrap());
                     }
                     _ => {}
                 }
@@ -294,6 +294,7 @@ impl<'a> ShapeInferer<'a> {
                     }
                     _ => bail!("kernel_shape not found for {op}"),
                 };
+                let dilations = get_attr_ints(node, "dilations").unwrap_or(&[1, 1]);
                 let out_channels = match op {
                     "Conv" => {
                         let w = input_shapes[1];
@@ -307,21 +308,22 @@ impl<'a> ShapeInferer<'a> {
                     bail!("invalid pads {:?}", pads);
                 }
 
+                let h_out = (x.concrete_size(2)? as i64 + 2 * pads[0]
+                    - dilations[0] * (kernel_shape[0] - 1)
+                    - 1)
+                    / strides[0]
+                    + 1;
+                let w_out = (x.concrete_size(3)? as i64 + 2 * pads[1]
+                    - dilations[1] * (kernel_shape[1] - 1)
+                    - 1)
+                    / strides[1]
+                    + 1;
+
                 let mut out_shape = Shape::empty();
                 out_shape.append_dim(x.size(0).clone()); // B
                 out_shape.append_dim(out_channels); // C
-                out_shape.append_dim(crate::shape::Dimension::Concrete(
-                    (x.concrete_size(2)? - 2 * (kernel_shape[0] as usize / 2)
-                        + pads[0] as usize
-                        + pads[2] as usize)
-                        / strides[0] as usize,
-                )); // H
-                out_shape.append_dim(crate::shape::Dimension::Concrete(
-                    (x.concrete_size(3)? - 2 * (kernel_shape[1] as usize / 2)
-                        + pads[1] as usize
-                        + pads[3] as usize)
-                        / strides[1] as usize,
-                )); // W
+                out_shape.append_dim(crate::shape::Dimension::Concrete(h_out as usize)); // H
+                out_shape.append_dim(crate::shape::Dimension::Concrete(w_out as usize)); // W
 
                 vec![out_shape]
             }
@@ -432,6 +434,7 @@ impl<'a> ShapeInferer<'a> {
             | "InstanceNormalization"
             | "Cast"
             | "Relu"
+            | "LeakyRelu"
             | "Sigmoid"
             | "Softmax"
             | "Tanh"
