@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 
 use crate::{
     gpu::TensorDesc,
-    onnx,
+    onnx::{self, NodeProto},
     tensor::DataType,
     utils::{get_attr_float, get_attr_int, get_attr_ints, get_attr_string},
 };
@@ -47,11 +47,16 @@ pub(crate) struct ShaderInvocation {
 }
 
 impl ShaderInvocation {
-    pub(crate) fn to_wgsl(&self) -> anyhow::Result<String> {
+    pub(crate) fn to_wgsl(&self, enable_f16: bool) -> anyhow::Result<String> {
         let template = SHADER_FILES
             .get(&self.file_name)
             .ok_or_else(|| anyhow!("invalid shader template '{}'", self.file_name))?;
-        Ok(tera::Tera::one_off(template, &self.context, false)?)
+        let wgsl = tera::Tera::one_off(template, &self.context, false)?;
+        if enable_f16 {
+            Ok(format!("enable f16;\n\n{wgsl}"))
+        } else {
+            Ok(wgsl)
+        }
     }
 
     pub(crate) fn dispatch(&self) -> (u32, u32, u32) {
@@ -484,6 +489,14 @@ pub(crate) fn compile_node(
     };
 
     Ok(invoc)
+}
+
+pub(crate) fn effective_inputs(node: &NodeProto) -> usize {
+    if node.op_type() == "Resize" {
+        1 // These ops are tracked statically so we remove tensor "params"
+    } else {
+        node.input.len()
+    }
 }
 
 pub(crate) fn is_untracked_op(op_type: &str) -> bool {

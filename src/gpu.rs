@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context};
 use wgpu::util::DeviceExt;
 
 use crate::{
-    compiler::{compile_node, is_reshape_op, is_untracked_op},
+    compiler::{compile_node, is_reshape_op, is_untracked_op, effective_inputs},
     onnx,
     shape::Shape,
     tensor::DataType,
@@ -36,12 +36,7 @@ impl TensorStorage {
         self.buffer.size()
     }
 
-    fn new(
-        device: &wgpu::Device,
-        desc: TensorDesc,
-        label: Option<&str>,
-        is_output: bool,
-    ) -> Self {
+    fn new(device: &wgpu::Device, desc: TensorDesc, label: Option<&str>, is_output: bool) -> Self {
         let usage = if is_output {
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC
         } else {
@@ -107,8 +102,20 @@ impl Op {
         descs: &HashMap<&str, TensorDesc>,
     ) -> anyhow::Result<Self> {
         let shader = compile_node(node, descs)?;
+        let enable_f16 = node
+            .input
+            .iter()
+            .take(effective_inputs(node))
+            .any(|input| matches!(descs[input.as_str()].dtype, DataType::F16))
+            || node
+                .output
+                .iter()
+                .any(|output| matches!(descs[output.as_str()].dtype, DataType::F16));
+        if enable_f16 {
+            bail!("f16 is currently not supported in naga");
+        }
         let shader_source = shader
-            .to_wgsl()
+            .to_wgsl(false)
             .with_context(|| anyhow!("compiling shader for {}", node.name()))?;
 
         // println!("{shader_source}");
@@ -166,7 +173,7 @@ pub(crate) struct Runner<'a> {
 const MAX_ALLOC_LIMIT: u64 = 3_500_000_000;
 
 impl<'a> Runner<'a> {
-    pub(crate) async fn new() -> anyhow::Result<Runner<'a>> {
+    pub(crate) async fn new(enable_f16: bool) -> anyhow::Result<Runner<'a>> {
         let instance = wgpu::Instance::new(wgpu::Backends::all());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -183,7 +190,11 @@ impl<'a> Runner<'a> {
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    features: wgpu::Features::empty(),
+                    features: if enable_f16 {
+                        wgpu::Features::SHADER_FLOAT16
+                    } else {
+                        wgpu::Features::empty()
+                    },
                     limits: wgpu::Limits {
                         max_storage_buffer_binding_size: 268435456,
                         ..Default::default()

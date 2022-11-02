@@ -5,7 +5,7 @@ use protobuf::Message;
 use structopt::StructOpt;
 
 use crate::{
-    compiler::{is_reshape_op, is_untracked_op},
+    compiler::{is_reshape_op, is_untracked_op, effective_inputs},
     gpu::{Op, TensorDesc},
     shape::Shape,
     tensor::DataType,
@@ -229,7 +229,8 @@ fn main() -> anyhow::Result<()> {
     // TODO: Move things out of main();
 
     let mut descs = HashMap::new(); // TODO: move this inside the runner/type inference phase
-    let mut runner = pollster::block_on(gpu::Runner::new())?;
+    let enable_f16 = descs.values().any(|desc: &TensorDesc| matches!(desc.dtype, DataType::F16));
+    let mut runner = pollster::block_on(gpu::Runner::new(enable_f16))?;
 
     for init in &graph.initializer {
         let dtype = dtype_inferer.get_type(init.name());
@@ -317,11 +318,7 @@ fn main() -> anyhow::Result<()> {
                 &runner.device,
                 node.input
                     .iter()
-                    .take(if node.op_type() == "Resize" {
-                        1 // These ops are tracked statically so we remove tensor "params"
-                    } else {
-                        node.input.len()
-                    })
+                    .take(effective_inputs(node))
                     .map(|input| runner.get_storage(input))
                     .collect::<anyhow::Result<Vec<&gpu::TensorStorage>>>()?,
                 node.output
