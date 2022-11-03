@@ -181,7 +181,10 @@ pub(crate) struct Runner<'a> {
 const MAX_ALLOC_LIMIT: u64 = 3_500_000_000;
 
 impl<'a> Runner<'a> {
-    pub(crate) async fn new(enable_f16: bool) -> anyhow::Result<Runner<'a>> {
+    pub(crate) async fn new(
+        max_buffer_size: Option<u32>,
+        enable_f16: bool,
+    ) -> anyhow::Result<Runner<'a>> {
         let instance = wgpu::Instance::new(wgpu::Backends::all());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -203,9 +206,12 @@ impl<'a> Runner<'a> {
                     } else {
                         wgpu::Features::empty()
                     },
-                    limits: wgpu::Limits {
-                        max_storage_buffer_binding_size: 268435456,
-                        ..Default::default()
+                    limits: match max_buffer_size {
+                        Some(max_storage_buffer_binding_size) => wgpu::Limits {
+                            max_storage_buffer_binding_size,
+                            ..Default::default()
+                        },
+                        None => wgpu::Limits::default(),
                     },
                     label: Some("Compute Device"),
                 },

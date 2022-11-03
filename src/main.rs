@@ -5,7 +5,7 @@ use protobuf::Message;
 use structopt::StructOpt;
 
 use crate::{
-    compiler::{is_reshape_op, is_untracked_op, effective_inputs},
+    compiler::{effective_inputs, is_reshape_op, is_untracked_op},
     gpu::{Op, TensorDesc},
     shape::Shape,
     tensor::DataType,
@@ -229,8 +229,11 @@ fn main() -> anyhow::Result<()> {
     // TODO: Move things out of main();
 
     let mut descs = HashMap::new(); // TODO: move this inside the runner/type inference phase
-    let enable_f16 = descs.values().any(|desc: &TensorDesc| matches!(desc.dtype, DataType::F16));
-    let mut runner = pollster::block_on(gpu::Runner::new(enable_f16))?;
+    let enable_f16 = descs
+        .values()
+        .any(|desc: &TensorDesc| matches!(desc.dtype, DataType::F16));
+    let max_buffer_size = descs.values().map(|desc| desc.size_of() as u32).max();
+    let mut runner = pollster::block_on(gpu::Runner::new(max_buffer_size, enable_f16))?;
 
     for init in &graph.initializer {
         let dtype = dtype_inferer.get_type(init.name());
@@ -411,7 +414,7 @@ fn main() -> anyhow::Result<()> {
         let filename = format!("activations/{}.npy", output.name());
         log::info!("saving to file {filename}");
         npy::save_to_file(&filename, tensor_vec, out_shape)
-            .with_context(|| anyhow!("failed to save to file output.npy"))?;
+            .with_context(|| anyhow!("failed to save to file {filename}"))?;
     }
     log::info!("done!");
 

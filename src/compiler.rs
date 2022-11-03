@@ -288,9 +288,7 @@ pub(crate) fn compile_node(
                 .numel()
                 .ok_or_else(|| anyhow!("could not get concrete shape for {}", node.output[0]))?;
 
-            let (workgroup_x, dispatch_x, num_groups) = dispatch_invocations(n_invocs as u64);
-            context.insert("workgroup_x", &workgroup_x);
-            context.insert("num_groups", &num_groups);
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs as u64);
 
             let axis = get_attr_int(node, "axis").ok_or_else(|| anyhow!("could not get axis"))?;
             let axis = out_shape.reldim(axis as isize);
