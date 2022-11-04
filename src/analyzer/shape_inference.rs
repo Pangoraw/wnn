@@ -6,7 +6,7 @@ use crate::onnx;
 use crate::shape::Shape;
 use crate::utils::*;
 
-pub(crate) struct ShapeInferer<'a> {
+pub(super) struct ShapeInferer<'a> {
     shapes: HashMap<&'a str, Shape>,
     constants: HashMap<&'a str, Vec<i64>>,
     known_shapes: HashMap<&'a str, Shape>,
@@ -15,7 +15,7 @@ pub(crate) struct ShapeInferer<'a> {
 }
 
 impl<'a> ShapeInferer<'a> {
-    pub(crate) fn new(graph: &'a onnx::GraphProto) -> Self {
+    pub(super) fn new(graph: &'a onnx::GraphProto) -> Self {
         Self {
             shapes: HashMap::new(),
             constants: HashMap::new(),
@@ -25,7 +25,7 @@ impl<'a> ShapeInferer<'a> {
         }
     }
 
-    pub(crate) fn infer_node(&mut self, node: &'a onnx::NodeProto) -> anyhow::Result<Vec<Shape>> {
+    pub(super) fn infer_node(&mut self, node: &'a onnx::NodeProto) -> anyhow::Result<Vec<Shape>> {
         let out = match node.op_type() {
             op @ ("Gemm" | "MatMul") => {
                 let transpose_a = if op == "Gemm" {
@@ -609,11 +609,11 @@ impl<'a> ShapeInferer<'a> {
         }
     }
 
-    pub(crate) fn get_shape(&self, node: &str) -> &Shape {
+    pub(super) fn get_shape(&self, node: &str) -> &Shape {
         &self.shapes[node]
     }
 
-    pub(crate) fn init(&mut self, node: &'a str, shape: Shape) {
+    pub(super) fn init(&mut self, node: &'a str, shape: Shape) {
         self.shapes.insert(node, shape);
     }
 }

@@ -11,14 +11,13 @@ use crate::{
     tensor::DataType,
 };
 
+mod analyzer;
 mod compiler;
 mod gpu;
 mod npy;
 mod onnx;
 mod shape;
-mod shape_inference;
 mod tensor;
-mod type_inference;
 mod utils;
 
 #[derive(StructOpt, Debug)]
@@ -70,104 +69,13 @@ fn main() -> anyhow::Result<()> {
     ]);
 
     let graph = model.graph;
-    let mut shape_inferer = shape_inference::ShapeInferer::new(&graph);
-    let mut dtype_inferer = type_inference::TypeInferer::new();
+    let descs = analyzer::analyze_graph(&graph, &dim_mappings)?;
 
-    for init in &graph.initializer {
-        let shape = Shape::from(&init.dims);
-        let dtype = DataType::from_int(init.data_type())?;
-        dtype_inferer.init(init.name(), dtype);
-        shape_inferer.init(init.name(), shape.clone());
-    }
-
-    println!("==== INPUT");
-    for input in &graph.input {
-        let dtype = tensor::DataType::from_int(input.type_.tensor_type().elem_type())?;
-        let shape = {
-            let tensor_shape =
-                input.type_.tensor_type().shape.as_ref().ok_or_else(|| {
-                    anyhow!("failed to get tensor shape for input {}", input.name())
-                })?;
-            Shape::from_tensor_shape_with_maps(tensor_shape, &dim_mappings)
-        };
-        println!("{}{}::{}", input.name(), &shape, &dtype);
-        dtype_inferer.init(input.name(), dtype);
-        shape_inferer.init(input.name(), shape);
-    }
-    println!("======");
-
-    let mut intermediaries = Vec::new();
-    for node in &graph.node {
-        let out_types = dtype_inferer.infer_node(node).with_context(|| {
-            format!(
-                "processing shapes for node {}[{}]({})",
-                node.name(),
-                node.op_type(),
-                node.input
-                    .iter()
-                    .map(|input| format!("{}{}", input, shape_inferer.get_shape(input)))
-                    .collect::<Vec<String>>()
-                    .join(", "),
-            )
-        })?;
-        let out_shapes = shape_inferer.infer_node(node).with_context(|| {
-            format!(
-                "processing shapes for node {}[{}]({})",
-                node.name(),
-                node.op_type(),
-                node.input
-                    .iter()
-                    .map(|input| format!("{}{}", input, shape_inferer.get_shape(input)))
-                    .collect::<Vec<String>>()
-                    .join(", "),
-            )
-        })?;
-        for (out, (out_type, out_shape)) in node
-            .output
-            .iter()
-            .zip(std::iter::zip(out_types, out_shapes))
-        {
-            intermediaries.push(out);
-            shape_inferer.init(out, out_shape);
-            dtype_inferer.init(out, out_type);
-        }
-
-        if &std::env::var_os("DUMP_INFERENCE")
-            .map(|s| s.to_str().unwrap().to_owned())
-            .unwrap_or_else(|| String::from("1"))
-            == "1"
-        {
-            for (i, out) in node.output.iter().enumerate() {
-                print!(
-                    "{}{}::{}",
-                    out,
-                    shape_inferer.get_shape(out),
-                    dtype_inferer.get_type(out)
-                );
-                if i < node.output.len() - 1 {
-                    print!(", ");
-                }
-            }
-            print!("\t= {}[{}](", node.name(), node.op_type());
-            for (i, input) in node.input.iter().enumerate() {
-                if input.is_empty() {
-                    print!("None");
-                } else {
-                    print!("{}{}", input, shape_inferer.get_shape(input));
-                }
-                if i < node.input.len() - 1 {
-                    print!(", ");
-                }
-            }
-            println!(")");
-        }
-    }
-
-    println!("=== OUTPUT");
     let mut s = 0;
     for output in &graph.output {
-        let computed_shape = shape_inferer.get_shape(output.name());
-        let computed_type = dtype_inferer.get_type(output.name());
+        let desc = &descs[output.name()];
+        let computed_shape = &desc.shape;
+        let computed_type = &desc.dtype;
         println!("{}{}::{}", output.name(), computed_shape, computed_type);
         if let Some(shape) = &output.type_.tensor_type().shape.0 {
             let real_shape = Shape::from_tensor_shape(shape);
@@ -187,9 +95,10 @@ fn main() -> anyhow::Result<()> {
     // Validation
     for val in &graph.value_info {
         if let Some(shape) = &val.type_.tensor_type().shape.0 {
-            let computed_shape = shape_inferer.get_shape(val.name());
+            let desc = &descs[val.name()];
+            let computed_shape = &desc.shape;
             let info_shape = Shape::from_tensor_shape(shape);
-            let computed_type = dtype_inferer.get_type(val.name());
+            let computed_type = &desc.dtype;
             let info_type = DataType::from_int(val.type_.tensor_type().elem_type())?;
             if computed_type != &info_type {
                 log::warn!(
@@ -226,9 +135,6 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // TODO: Move things out of main();
-
-    let mut descs = HashMap::new(); // TODO: move this inside the runner/type inference phase
     let enable_f16 = descs
         .values()
         .any(|desc: &TensorDesc| matches!(desc.dtype, DataType::F16));
@@ -236,19 +142,16 @@ fn main() -> anyhow::Result<()> {
     let mut runner = pollster::block_on(gpu::Runner::new(max_buffer_size, enable_f16))?;
 
     for init in &graph.initializer {
-        let dtype = dtype_inferer.get_type(init.name());
-        let shape = shape_inferer.get_shape(init.name());
-        let desc = TensorDesc::new(shape.clone(), dtype.clone());
+        let desc = &descs[init.name()];
         runner
             .add_init(init, desc.clone())
             .with_context(|| anyhow!("failed to create buffer for node {}", init.name()))?;
-        descs.insert(init.name(), desc);
     }
 
     for input in &graph.input {
-        let dtype = dtype_inferer.get_type(input.name());
-        let shape = shape_inferer.get_shape(input.name());
-        let desc = TensorDesc::new(shape.clone(), dtype.clone());
+        let desc = &descs[input.name()];
+        let shape = &desc.shape;
+        let dtype = &desc.dtype;
 
         let init: &str = &args.init;
         log::info!("using input \"{init}\"");
@@ -306,25 +209,11 @@ fn main() -> anyhow::Result<()> {
         }
 
         runner.add_node_with_init(input.name(), desc.clone(), bytemuck::cast_slice(&floats))?;
-        descs.insert(input.name(), desc);
     }
 
     for output in &graph.output {
-        let dtype = dtype_inferer.get_type(output.name());
-        let shape = shape_inferer.get_shape(output.name());
-        let desc = TensorDesc::new(shape.clone(), dtype.clone());
+        let desc = &descs[output.name()];
         runner.add_node(output.name(), desc.clone(), true)?;
-        descs.insert(output.name(), desc);
-    }
-
-    for inter in &intermediaries {
-        if descs.contains_key(inter.as_str()) {
-            continue;
-        }
-        let dtype = dtype_inferer.get_type(inter);
-        let shape = shape_inferer.get_shape(inter);
-        let desc = TensorDesc::new(shape.clone(), dtype.clone());
-        descs.insert(inter.as_str(), desc);
     }
 
     runner
@@ -391,14 +280,13 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir(folder)?;
         }
 
-        for inter in &intermediaries {
+        for (inter, desc) in descs.iter() {
             let tensor = runner.get_storage(inter)?;
 
             let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
             let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 
-            let inter_shape = &descs[inter.as_str()].shape;
-            npy::save_to_file(&format!("activations/{inter}.npy"), tensor_vec, inter_shape)?;
+            npy::save_to_file(&format!("activations/{inter}.npy"), tensor_vec, &desc.shape)?;
         }
     } else {
         let output = &graph.output[0];
@@ -420,3 +308,4 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+

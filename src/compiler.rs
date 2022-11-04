@@ -6,10 +6,9 @@ use anyhow::{anyhow, bail};
 use lazy_static::lazy_static;
 
 use crate::{
-    gpu::TensorDesc,
     onnx::{self, NodeProto},
     tensor::DataType,
-    utils::{get_attr_float, get_attr_int, get_attr_ints, get_attr_string},
+    utils::{get_attr_float, get_attr_int, get_attr_ints, get_attr_string}, analyzer::TensorDescs,
 };
 
 lazy_static! {
@@ -75,8 +74,6 @@ fn ints_to_strides(sizes: &mut [i64]) {
         current *= x;
     });
 }
-
-type TensorDescs<'a> = HashMap<&'a str, TensorDesc>;
 
 fn compute_strides(descs: &TensorDescs, names: &[String]) -> anyhow::Result<Vec<Vec<i64>>> {
     names
@@ -168,6 +165,11 @@ fn dispatch_invocations(n_invocs: u64) -> (u64, u64, u64) {
     )
 }
 
+/// Used to compute the dispatches in the case of `n_invocs`, usually the number
+/// of elements in the output. This adds the following to the context which must use them
+/// in the shader, otherwise the result may not be what is expected:
+///  - `workgroup_x`
+///  - `num_groups`
 fn add_invocs_to_context(context: &mut tera::Context, n_invocs: u64) -> u64 {
     let (workgroup_x, dispatch_x, num_groups) = dispatch_invocations(n_invocs);
     context.insert("workgroup_x", &workgroup_x);
@@ -175,6 +177,8 @@ fn add_invocs_to_context(context: &mut tera::Context, n_invocs: u64) -> u64 {
     dispatch_x
 }
 
+/// Generates the relevant `ShaderInvocation` for a given node using its input descriptions and
+/// attributes, the corresponding wgsl code can then be retrieved using `ShaderInvocation::to_wgsl()`.
 pub(crate) fn compile_node(
     node: &onnx::NodeProto,
     descs: &TensorDescs,
@@ -288,6 +292,13 @@ pub(crate) fn compile_node(
                 .numel()
                 .ok_or_else(|| anyhow!("could not get concrete shape for {}", node.output[0]))?;
 
+            if node.input.len() != 2 {
+                bail!(
+                    "unsupported number of input {} for Concat",
+                    node.input.len()
+                );
+            }
+
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs as u64);
 
             let axis = get_attr_int(node, "axis").ok_or_else(|| anyhow!("could not get axis"))?;
@@ -324,21 +335,22 @@ pub(crate) fn compile_node(
             let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
-            context.insert(
-                "activation",
-                &match act {
-                    // f(x) =
-                    "Relu" => String::from("max(x, 0.)"),
-                    "LeakyRelu" => {
-                        let alpha = get_attr_float(node, "alpha").unwrap_or(0.01);
-                        format!("{alpha} * x")
-                    }
-                    "Sigmoid" => String::from("1. / (1. + exp(-x))"),
-                    "Cos" => String::from("cos(x)"),
-                    "Sin" => String::from("sin(x)"),
-                    _ => unreachable!(),
-                },
-            );
+            if act == "LeakyRelu" {
+                let alpha = get_attr_float(node, "alpha").unwrap_or(0.01);
+                context.insert("activation", &format!("{alpha} * x"))
+            } else {
+                context.insert(
+                    "activation",
+                    match act {
+                        // f(x) =
+                        "Relu" => "max(x, 0.)",
+                        "Sigmoid" => "1. / (1. + exp(-x))",
+                        "Cos" => "cos(x)",
+                        "Sin" => "sin(x)",
+                        _ => unreachable!(),
+                    },
+                );
+            }
 
             ShaderInvocation {
                 file_name: "activation",

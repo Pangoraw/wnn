@@ -6,18 +6,18 @@ use crate::onnx;
 use crate::tensor::DataType;
 use crate::utils::get_attr_int;
 
-pub(crate) struct TypeInferer<'a> {
+pub(super) struct TypeInferer<'a> {
     types: HashMap<&'a str, DataType>,
 }
 
 impl<'a> TypeInferer<'a> {
-    pub(crate) fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             types: HashMap::new(),
         }
     }
 
-    pub(crate) fn infer_node(
+    pub(super) fn infer_node(
         &mut self,
         node: &'a onnx::NodeProto,
     ) -> anyhow::Result<Vec<DataType>> {
@@ -66,11 +66,11 @@ impl<'a> TypeInferer<'a> {
         Ok(out)
     }
 
-    pub(crate) fn init(&mut self, name: &'a str, dtype: DataType) {
+    pub(super) fn init(&mut self, name: &'a str, dtype: DataType) {
         self.types.insert(name, dtype);
     }
 
-    pub(crate) fn get_type(&self, name: &str) -> &DataType {
+    pub(super) fn get_type(&self, name: &str) -> &DataType {
         &self.types[name]
     }
 }
