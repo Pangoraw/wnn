@@ -1,8 +1,8 @@
-use std::{collections::HashMap, ops::Sub};
+use tensor::CPUTensor;
 
-use anyhow::{anyhow, Context};
-use protobuf::Message;
-use structopt::StructOpt;
+use std::{collections::HashMap, ops::Sub, path::PathBuf};
+
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::{
     compiler::{effective_inputs, is_reshape_op, is_untracked_op},
@@ -14,52 +14,27 @@ use crate::{
 mod analyzer;
 mod compiler;
 mod gpu;
-mod npy;
-mod onnx;
+pub mod npy;
+pub mod onnx;
 mod shape;
 mod tensor;
 mod utils;
 
-#[derive(StructOpt, Debug)]
-struct Args {
-    #[structopt(default_value = "./sd-v1-5-onnx/vae_decoder_sim.onnx")]
-    input_model: std::path::PathBuf,
-    dump_folder: Option<std::path::PathBuf>,
-
-    #[structopt(long, short, default_value = "ones")]
-    init: String,
+#[derive(Debug)]
+pub enum InitMode<'a> {
+    Ones,
+    Range,
+    File(&'a str),
 }
 
-fn main() -> anyhow::Result<()> {
-    env_logger::init();
+pub type EvalOutput<'a> = HashMap<&'a str, CPUTensor>;
 
-    let args = Args::from_args();
-
-    let dump_folder = args.dump_folder;
-    let filename = args.input_model;
-
-    // let filename = "./model.onnx";
-    // let filename = "vae_decoder_sim.onnx";
-    // let filename = "vae_decoder.onnx";
-    // let filename = "unet.onnx";
-    // let filename = "./simple_model.onnx";
-    // let filename = "/home/paul/Downloads/resnet18-v1-7.onnx";
-    // let filename = "/home/pberg/Downloads/resnet18-v1-7.onnx";
-    // let filename = "./sd-v1-5-onnx/vae_decoder_sim.onnx";
-    // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_pytorch_1_1.onnx";
-    // let filename = "/home/pberg/irisa/diffusers/decoder_v1_4_fp16_pytorch_fixed.onnx";
-    // let filename = "/home/pberg/Projects/ONNX.jl/model.onnx";
-    // let filename = "/home/pberg/Projects/ONNX.jl/model_sim.onnx";
-    // let filename = "unet_sim2.onnx";
-    // let filename = "/home/pberg/Downloads/uc_merced_model(2).onnx";
-
-    let mut onnx_file = std::fs::OpenOptions::new()
-        .read(true)
-        .open(&filename)
-        .with_context(|| format!("while opening file {}", filename.display()))?;
-    let model = onnx::ModelProto::parse_from_reader(&mut onnx_file)?;
-
-    // Concretize common dimensions
+pub fn eval_graph<'a>(
+    graph: &'a onnx::GraphProto,
+    init: InitMode<'_>,
+    dump_folder: Option<PathBuf>,
+) -> Result<EvalOutput<'a>> {
+    // Concretize common dimensions, TODO: pass as arg
     let dim_mappings = HashMap::from_iter([
         ("N", shape::Dimension::Concrete(1)),
         ("batch", shape::Dimension::Concrete(1)),
@@ -68,7 +43,6 @@ fn main() -> anyhow::Result<()> {
         ("width", shape::Dimension::Concrete(64)),
     ]);
 
-    let graph = model.graph;
     let descs = analyzer::analyze_graph(&graph, &dim_mappings)?;
 
     let mut s = 0;
@@ -80,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(shape) = &output.type_.tensor_type().shape.0 {
             let real_shape = Shape::from_tensor_shape(shape);
             if computed_shape != &real_shape && real_shape.is_concrete() {
-                anyhow::bail!(
+                bail!(
                     "{}: computed {}, stored {}",
                     output.name(),
                     computed_shape,
@@ -153,50 +127,64 @@ fn main() -> anyhow::Result<()> {
         let shape = &desc.shape;
         let dtype = &desc.dtype;
 
-        let init: &str = &args.init;
-        log::info!("using input \"{init}\"");
+        log::debug!("using input \"{:?}\"", &init);
 
         let numel = shape.numel().unwrap();
-        let floats: Vec<u8> = match (init, dtype) {
-            ("ones", DataType::F32) => bytemuck::cast_slice(
+        let floats: Vec<u8> = match (&init, dtype) {
+            (InitMode::Ones, DataType::F32) => bytemuck::cast_slice(
                 &std::iter::repeat([1.0])
                     .flatten()
                     .take(numel)
                     .collect::<Vec<f32>>(),
             )
             .to_vec(),
-            ("ones", DataType::F64) => bytemuck::cast_slice(
+            (InitMode::Ones, DataType::F64) => bytemuck::cast_slice(
                 &std::iter::repeat([1.0])
                     .flatten()
                     .take(numel)
                     .collect::<Vec<f64>>(),
             )
             .to_vec(),
-            ("arange", DataType::F32) => bytemuck::cast_slice(
+            (InitMode::Ones, DataType::I64) => bytemuck::cast_slice(
+                &std::iter::repeat([1])
+                    .flatten()
+                    .take(numel)
+                    .collect::<Vec<i64>>(),
+            )
+            .to_vec(),
+            (InitMode::Range, DataType::F32) => bytemuck::cast_slice(
                 &(0..numel)
                     .map(|i| i as f32)
                     .take(numel)
                     .collect::<Vec<f32>>(),
             )
             .to_vec(),
-            ("arange", DataType::F64) => bytemuck::cast_slice(
+            (InitMode::Range, DataType::F64) => bytemuck::cast_slice(
                 &(0..numel)
                     .map(|i| i as f64)
                     .take(numel)
                     .collect::<Vec<f64>>(),
             )
             .to_vec(),
-            _ => {
-                let (read_shape, data) = npy::read_from_file(init)
-                    .with_context(|| anyhow!("when open file {}", init))?;
+            (InitMode::File(path), _) if path.ends_with(".npy") => {
+                let (read_shape, data) = npy::read_from_file(path)
+                    .with_context(|| anyhow!("when open file {}", path))?;
                 if shape != &read_shape.shape {
-                    anyhow::bail!(
+                    bail!(
                         "invalid shape from input file {}, expected {shape}",
                         read_shape.shape
                     );
                 }
                 data
             }
+            (InitMode::File(path), DataType::F32)
+                if path.ends_with(".jpeg") || path.ends_with(".jpg") =>
+            {
+                let img = image::open(path)?;
+                let buf = img.to_rgb32f();
+                bytemuck::cast_slice(&buf).to_vec()
+            }
+            (init, dtype) => bail!("invalid initialization '{:?}' for type {dtype}", init),
         };
 
         // Some inputs can also be present in initializers, skip those
@@ -209,6 +197,38 @@ fn main() -> anyhow::Result<()> {
         }
 
         runner.add_node_with_init(input.name(), desc.clone(), bytemuck::cast_slice(&floats))?;
+    }
+
+    for node in graph
+        .node
+        .iter()
+        .filter(|node| node.op_type() == "Constant")
+    {
+        let output = &node.output[0];
+        let desc = &descs[output.as_str()];
+
+        let Some(attr) = node.attribute.first() else {
+            bail!("attribute not provided for Constant {}", node.name());
+        };
+
+        let mut i = [0];
+        let mut f = [0.];
+        let data: &[u8] = match attr.name() {
+            "value" => attr.t.raw_data(),
+            "value_int" => {
+                i[0] = attr.i();
+                bytemuck::cast_slice(&i)
+            }
+            "value_ints" => bytemuck::cast_slice(&attr.ints),
+            "value_float" => {
+                f[0] = attr.f();
+                bytemuck::cast_slice(&f)
+            }
+            "value_floats" => bytemuck::cast_slice(&attr.floats),
+            _ => bail!("unsupported Constant type '{}'", attr.name()),
+        };
+
+        runner.add_node_with_init(output.as_str(), desc.clone(), data)?;
     }
 
     for output in &graph.output {
@@ -275,37 +295,52 @@ fn main() -> anyhow::Result<()> {
         runner.queue.submit(std::iter::once(encoder.finish()));
     }
 
-    if let Some(folder) = dump_folder {
+    let outputs = if let Some(folder) = dump_folder {
         if !folder.exists() {
             std::fs::create_dir(folder)?;
         }
 
-        for (inter, desc) in descs.iter() {
-            let tensor = runner.get_storage(inter)?;
+        descs
+            .iter()
+            .map(|(inter, desc)| -> Result<(&str, CPUTensor)> {
+                let tensor = runner.get_storage(inter)?;
 
-            let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
-            let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
-
-            npy::save_to_file(&format!("activations/{inter}.npy"), tensor_vec, &desc.shape)?;
-        }
+                let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
+                // let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
+                // npy::save_to_file(&format!("activations/{inter}.npy"), tensor_vec, &desc.shape)?;
+                Ok((inter, CPUTensor::new(desc.clone(), &tensor_bytes)))
+            })
+            .collect::<Result<Vec<(&str, CPUTensor)>>>()?
     } else {
-        let output = &graph.output[0];
-        let tensor = runner.get_storage(output.name())?;
-        let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
+        graph
+            .output
+            .iter()
+            .map(|output| -> Result<(&str, CPUTensor)> {
+                let tensor = runner.get_storage(output.name())?;
+                let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
+                let desc = &descs[output.name()];
 
-        let elapsed = std::time::Instant::now().sub(time);
-        log::info!("run done ({:?})", elapsed);
+                let elapsed = std::time::Instant::now().sub(time);
+                log::info!("run done ({:?})", elapsed);
 
-        let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
+                // let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 
-        let out_shape = &descs[output.name()].shape;
-        let filename = format!("activations/{}.npy", output.name());
-        log::info!("saving to file {filename}");
-        npy::save_to_file(&filename, tensor_vec, out_shape)
-            .with_context(|| anyhow!("failed to save to file {filename}"))?;
-    }
+                // let out_shape = &descs[output.name()].shape;
+                // let filename = format!("activations/{}.npy", output.name());
+                // log::info!("saving to file {filename}");
+
+                // npy::save_to_file(&filename, tensor_vec, out_shape)
+                //     .with_context(|| anyhow!("failed to save to file {filename}"))?;
+
+                Ok((
+                    output.name(),
+                    CPUTensor::new(desc.clone(), &tensor_bytes),
+                ))
+            })
+            .collect::<Result<Vec<(&str, CPUTensor)>>>()?
+    };
+    let outputs = HashMap::from_iter(outputs);
     log::info!("done!");
 
-    Ok(())
+    Ok(outputs)
 }
-

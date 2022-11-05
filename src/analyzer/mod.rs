@@ -18,7 +18,7 @@ pub(crate) fn analyze_graph<'a>(
     graph: &'a onnx::GraphProto,
     dim_mappings: &HashMap<&str, shape::Dimension>,
 ) -> Result<TensorDescs<'a>, anyhow::Error> {
-    let mut shape_inferer = shape_inference::ShapeInferer::new(&graph);
+    let mut shape_inferer = shape_inference::ShapeInferer::new(graph);
     let mut dtype_inferer = type_inference::TypeInferer::new();
 
     let mut descs = TensorDescs::new();
@@ -39,7 +39,7 @@ pub(crate) fn analyze_graph<'a>(
                 input.type_.tensor_type().shape.as_ref().ok_or_else(|| {
                     anyhow!("failed to get tensor shape for input {}", input.name())
                 })?;
-            Shape::from_tensor_shape_with_maps(tensor_shape, &dim_mappings)
+            Shape::from_tensor_shape_with_maps(tensor_shape, dim_mappings)
         };
         println!("{}{}::{}", input.name(), &shape, &dtype);
         dtype_inferer.init(input.name(), dtype.clone());

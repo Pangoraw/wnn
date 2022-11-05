@@ -84,6 +84,8 @@ impl<'a> ShapeInferer<'a> {
                 };
 
                 if let Some(c) = c {
+                    let mut c = (*c).clone();
+                    c.squeeze(); // poor broadcast...
                     if !(c.ndims() == 1 && c.size(0) == b.size(-1)) {
                         bail!("invalid bias shape for Gemm c{}", c);
                     }
@@ -277,7 +279,6 @@ impl<'a> ShapeInferer<'a> {
                             .ok_or_else(|| anyhow!("failed to get shape for input {}", input))
                     })
                     .collect::<anyhow::Result<Vec<&Shape>>>()?;
-                let pads = get_attr_ints(node, "pads").unwrap_or(&[0, 0, 0, 0]);
                 let strides = get_attr_ints(node, "strides").unwrap_or(&[1, 1]);
                 let x = input_shapes[0];
 
@@ -294,6 +295,23 @@ impl<'a> ShapeInferer<'a> {
                     }
                     _ => bail!("kernel_shape not found for {op}"),
                 };
+
+                let mut pads = [0; 4];
+                let pads = match get_attr_ints(node, "pads") {
+                    Some(pads) => pads,
+                    None => match get_attr_string(node, "auto_pad") {
+                        Some("SAME_UPPER") => {
+                            pads[0] = kernel_shape[0] / 2;
+                            pads[1] = kernel_shape[1] / 2;
+                            pads[2] = kernel_shape[0] / 2;
+                            pads[3] = kernel_shape[1] / 2;
+                            &pads
+                        }
+                        Some("NOTSET") | None => bail!("no explicit padding specified for {op}"),
+                        Some(other) => bail!("unsupported padding type {other} for {op}"),
+                    },
+                };
+
                 let dilations = get_attr_ints(node, "dilations").unwrap_or(&[1, 1]);
                 let out_channels = match op {
                     "Conv" => {
@@ -534,11 +552,7 @@ impl<'a> ShapeInferer<'a> {
                     self.find_constant(node.input[0].as_str()),
                     self.find_constant(node.input[1].as_str()),
                 ) {
-                    let out = a
-                        .iter()
-                        .zip(b)
-                        .map(|(a, b)| if a == b { 1 } else { 0 })
-                        .collect();
+                    let out = a.iter().zip(b).map(|(a, b)| (a == b) as i64).collect();
                     self.constants.insert(node.output[0].as_str(), out);
                 } else {
                     log::debug!(

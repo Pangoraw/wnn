@@ -6,9 +6,10 @@ use anyhow::{anyhow, bail};
 use lazy_static::lazy_static;
 
 use crate::{
+    analyzer::TensorDescs,
     onnx::{self, NodeProto},
     tensor::DataType,
-    utils::{get_attr_float, get_attr_int, get_attr_ints, get_attr_string}, analyzer::TensorDescs,
+    utils::{get_attr_float, get_attr_int, get_attr_ints, get_attr_string},
 };
 
 lazy_static! {
@@ -526,6 +527,8 @@ pub(crate) fn compile_node(
     Ok(invoc)
 }
 
+/// For some ops, the static analysis is used to get the parameters and therefore not all inputs
+/// are needed. That's why we only use a subset of the inputs in this case.
 pub(crate) fn effective_inputs(node: &NodeProto) -> usize {
     if node.op_type() == "Resize" {
         1 // These ops are tracked statically so we remove tensor "params"
@@ -534,6 +537,9 @@ pub(crate) fn effective_inputs(node: &NodeProto) -> usize {
     }
 }
 
+/// These ops get a special handling and should not result in a ShaderInvocation
+/// Basically, we only currently support Shape in static analysis and Constant are
+/// added as initializer before any allocation happens.
 pub(crate) fn is_untracked_op(op_type: &str) -> bool {
     matches!(op_type, "Shape" | "Constant")
 }

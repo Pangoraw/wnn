@@ -14,7 +14,9 @@ const SUPPORTED_VERSION: [u8; 2] = [
 /// Saves tensor data to the numpy file format
 /// see https://numpy.org/doc/stable/reference/generated/numpy.lib.format.html
 /// for more details.
-pub(crate) fn save_to_file(filename: &str, data: &[f32], shape: &Shape) -> Result<usize> {
+pub fn save_to_file(filename: &str, data: &[u8], desc: &TensorDesc) -> Result<usize> {
+    let shape = &desc.shape;
+
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -22,6 +24,10 @@ pub(crate) fn save_to_file(filename: &str, data: &[f32], shape: &Shape) -> Resul
 
     if !shape.is_concrete() {
         bail!("cannot save not concrete shape {}", shape);
+    }
+
+    if !matches!(desc.dtype, DataType::F32) {
+        bail!("only type f32 is currently supported");
     }
 
     let header = format!(
@@ -44,10 +50,9 @@ pub(crate) fn save_to_file(filename: &str, data: &[f32], shape: &Shape) -> Resul
     file.write_all(&header)?;
 
     file.write_all(&std::iter::repeat(b' ').take(padding).collect::<Vec<u8>>())?;
-    let data_slice = bytemuck::cast_slice(data);
-    n += data_slice.len();
+    n += data.len();
 
-    file.write_all(data_slice)?;
+    file.write_all(data)?;
 
     Ok(n)
 }

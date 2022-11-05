@@ -13,7 +13,7 @@ pub(crate) enum Dimension {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Shape {
+pub struct Shape {
     dims: Vec<Dimension>,
 }
 

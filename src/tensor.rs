@@ -2,8 +2,10 @@ use std::fmt::Display;
 
 use anyhow::bail;
 
+use crate::gpu::TensorDesc;
+
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum DataType {
+pub enum DataType {
     I32,
     I64,
     F16,
@@ -47,5 +49,51 @@ impl DataType {
 impl Display for DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.to_str())
+    }
+}
+
+pub enum CPUTensorData {
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+pub struct CPUTensor {
+    pub desc: TensorDesc,
+    pub data: CPUTensorData,
+}
+
+impl CPUTensor {
+    pub fn raw_data(&self) -> &[u8] {
+        match &self.data {
+            CPUTensorData::I32(v) => bytemuck::cast_slice(&v),
+            CPUTensorData::I64(v) => bytemuck::cast_slice(&v),
+            CPUTensorData::F32(v) => bytemuck::cast_slice(&v),
+            CPUTensorData::F64(v) => bytemuck::cast_slice(&v),
+        }
+    }
+
+    pub(crate) fn new(desc: TensorDesc, data: &[u8]) -> Self {
+        let data = match desc.dtype {
+            DataType::I32 => {
+                let data = bytemuck::cast_slice(data);
+                CPUTensorData::I32(data.to_vec())
+            }
+            DataType::I64 => {
+                let data = bytemuck::cast_slice(data);
+                CPUTensorData::I64(data.to_vec())
+            }
+            DataType::F32 => {
+                let data = bytemuck::cast_slice(data);
+                CPUTensorData::F32(data.to_vec())
+            }
+            DataType::F64 => {
+                let data = bytemuck::cast_slice(data);
+                CPUTensorData::F64(data.to_vec())
+            }
+            _ => unimplemented!("{}", desc.dtype),
+        };
+        Self { desc, data }
     }
 }

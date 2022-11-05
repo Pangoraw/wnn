@@ -11,9 +11,9 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub(crate) struct TensorDesc {
-    pub(crate) shape: Shape,
-    pub(crate) dtype: DataType,
+pub struct TensorDesc {
+    pub shape: Shape,
+    pub dtype: DataType,
 }
 
 impl TensorDesc {
@@ -172,8 +172,6 @@ pub(crate) struct Runner<'a> {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
 
-    tensors: HashMap<&'a str, TensorStorage>,
-
     slots: Vec<TensorStorage>,
     which_slots: HashMap<&'a str, usize>,
 }
@@ -222,18 +220,13 @@ impl<'a> Runner<'a> {
         Ok(Self {
             device,
             queue,
-            tensors: HashMap::new(),
             slots: Vec::new(),
             which_slots: HashMap::new(),
         })
     }
 
     pub(crate) fn total_allocated_size(&self) -> u64 {
-        self.tensors
-            .values()
-            .map(|tensor| tensor.size())
-            .sum::<u64>()
-            + self.slots.iter().map(|tensor| tensor.size()).sum::<u64>()
+        self.slots.iter().map(|tensor| tensor.size()).sum::<u64>()
     }
 
     /// Performs tensor allocation by grouping allocations of the same size together.
@@ -264,12 +257,10 @@ impl<'a> Runner<'a> {
                     let input = &node.input[0];
                     let output = &node.output[0];
 
-                    if self.tensors.contains_key(input.as_str()) {
-                        self.tensors.remove(input.as_str());
-                    }
-
-                    if self.tensors.contains_key(output.as_str()) {
-                        self.tensors.remove(input.as_str());
+                    if self.which_slots.contains_key(input.as_str()) {
+                        self.which_slots
+                            .insert(output.as_str(), self.which_slots[input.as_str()]);
+                        continue;
                     }
 
                     let input_desc = descs[input.as_str()].clone();
@@ -288,8 +279,7 @@ impl<'a> Runner<'a> {
                 }
 
                 for input in &node.input {
-                    if self.tensors.contains_key(input.as_str())
-                        || self.which_slots.contains_key(input.as_str())
+                    if self.which_slots.contains_key(input.as_str())
                         || !descs.contains_key(input.as_str())
                     {
                         continue;
@@ -308,8 +298,7 @@ impl<'a> Runner<'a> {
                 }
 
                 for output in &node.output {
-                    if self.tensors.contains_key(output.as_str())
-                        || self.which_slots.contains_key(output.as_str())
+                    if self.which_slots.contains_key(output.as_str())
                         || !descs.contains_key(output.as_str())
                     {
                         continue;
@@ -331,30 +320,24 @@ impl<'a> Runner<'a> {
             return Ok(());
         }
 
-        let mut aliases = HashMap::new();
-        for node in nodes {
-            if is_reshape_op(node.op_type()) {
-                let input = &node.input[0];
-                let output = &node.output[0];
-
-                aliases.insert(input, output);
-            }
-        }
-
         // Iterate the nodes in reverse to get liveness ranges for free.
         // See https://www.mattkeeter.com/blog/2022-10-04-ssra/ for more details.
         for (i, node) in nodes.iter().enumerate().rev() {
-            if is_reshape_op(node.op_type()) || is_untracked_op(node.op_type()) {
+            if is_untracked_op(node.op_type()) {
                 continue;
             }
 
-            for input in node.input.iter().take(effective_inputs(node)).map(|input| {
-                match aliases.get(input) {
-                    Some(output) => output,
-                    None => input,
-                }
-            }) {
-                if self.tensors.contains_key(input.as_str()) || !descs.contains_key(input.as_str())
+            if is_reshape_op(node.op_type()) {
+                // For reshape ops, alias buffers
+                let output_slot = self.which_slots[node.output[0].as_str()];
+                self.which_slots.insert(node.input[0].as_str(), output_slot);
+
+                continue;
+            }
+
+            for input in node.input.iter().take(effective_inputs(node)) {
+                if self.which_slots.contains_key(input.as_str())
+                    || !descs.contains_key(input.as_str())
                 {
                     continue;
                 }
@@ -393,17 +376,20 @@ impl<'a> Runner<'a> {
                             force_readable,
                         ));
 
+                        println!(
+                            "{input}, {} {}",
+                            &self.slots[i].desc.size_of(),
+                            slots.len(),
+                        );
+
                         slots.push(Slot { free: false });
-                        self.which_slots.insert(input, slots.len() - 1);
+                        self.which_slots.insert(input, self.slots.len() - 1);
                     }
                 }
             }
 
-            for output in node.output.iter().map(|input| match aliases.get(input) {
-                Some(output) => output,
-                None => input,
-            }) {
-                if self.tensors.contains_key(output.as_str())
+            for output in node.output.iter() {
+                if self.which_slots.contains_key(output.as_str())
                     || !descs.contains_key(output.as_str())
                 {
                     continue;
@@ -415,12 +401,6 @@ impl<'a> Runner<'a> {
                 let slot: &mut Slot = &mut slots[self.which_slots[output.as_str()]];
                 slot.free = true;
             }
-        }
-
-        for (input, output) in aliases {
-            assert!(!self.which_slots.contains_key(input.as_str()));
-            self.which_slots
-                .insert(input.as_str(), self.which_slots[output.as_str()]);
         }
 
         if &std::env::var_os("DUMP_ALLOCS")
@@ -475,13 +455,10 @@ impl<'a> Runner<'a> {
     }
 
     pub(crate) fn get_storage(&self, name: &str) -> anyhow::Result<&TensorStorage> {
-        self.tensors
-            .get(name)
-            .or_else(|| match self.which_slots.get(name) {
-                Some(i) if *i < self.slots.len() => Some(&self.slots[*i]),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow!("tensor {} not found", name))
+        match self.which_slots.get(name) {
+            Some(i) if *i < self.slots.len() => Ok(&self.slots[*i]),
+            _ => Err(anyhow!("failed to find tensor for {name}")),
+        }
     }
 
     pub(crate) fn add_node(
@@ -491,10 +468,13 @@ impl<'a> Runner<'a> {
         is_output: bool,
     ) -> anyhow::Result<()> {
         let storage = TensorStorage::new(&self.device, desc, Some(name), is_output);
-        if self.tensors.contains_key(name) {
+        if self.which_slots.contains_key(name) {
             anyhow::bail!("node {} was already inserted in runner", name);
         }
-        self.tensors.insert(name, storage);
+
+        let tensor_idx = self.slots.len();
+        self.slots.push(storage);
+        self.which_slots.insert(name, tensor_idx);
         Ok(())
     }
 
@@ -533,11 +513,13 @@ impl<'a> Runner<'a> {
                 desc.dtype,
             );
         }
-        if self.tensors.contains_key(name) {
+        if self.which_slots.contains_key(name) {
             bail!("tensor {} was already inserted in runner", name);
         }
         let storage = TensorStorage::new_with_init(&self.device, raw_data, desc, Some(name));
-        self.tensors.insert(name, storage);
+        let tensor_idx = self.which_slots.len();
+        self.which_slots.insert(name, tensor_idx);
+        self.slots.push(storage);
         Ok(())
     }
 }
