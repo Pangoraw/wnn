@@ -140,27 +140,18 @@ pub fn eval_graph<'a>(
 
         let numel = shape.numel().unwrap();
         let floats: Vec<u8> = match (&init, dtype) {
-            (InitMode::Ones, DataType::F32) => bytemuck::cast_slice(
-                &std::iter::repeat([1.0])
-                    .flatten()
-                    .take(numel)
-                    .collect::<Vec<f32>>(),
-            )
-            .to_vec(),
-            (InitMode::Ones, DataType::F64) => bytemuck::cast_slice(
-                &std::iter::repeat([1.0])
-                    .flatten()
-                    .take(numel)
-                    .collect::<Vec<f64>>(),
-            )
-            .to_vec(),
-            (InitMode::Ones, DataType::I64) => bytemuck::cast_slice(
-                &std::iter::repeat([1])
-                    .flatten()
-                    .take(numel)
-                    .collect::<Vec<i64>>(),
-            )
-            .to_vec(),
+            (InitMode::Ones, DataType::F32) => {
+                bytemuck::cast_slice(&std::iter::repeat(1.0).take(numel).collect::<Vec<f32>>())
+                    .to_vec()
+            }
+            (InitMode::Ones, DataType::F64) => {
+                bytemuck::cast_slice(&std::iter::repeat(1.0).take(numel).collect::<Vec<f64>>())
+                    .to_vec()
+            }
+            (InitMode::Ones, DataType::I64) => {
+                bytemuck::cast_slice(&std::iter::repeat(1).take(numel).collect::<Vec<i64>>())
+                    .to_vec()
+            }
             (InitMode::Range, DataType::F32) => bytemuck::cast_slice(
                 &(0..numel)
                     .map(|i| i as f32)
