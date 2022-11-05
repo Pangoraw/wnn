@@ -3,10 +3,9 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Context};
 
 use crate::{
-    gpu::TensorDesc,
     onnx,
     shape::{self, Shape},
-    tensor::DataType,
+    tensor::{DataType, TensorDesc},
 };
 
 mod shape_inference;

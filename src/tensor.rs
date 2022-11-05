@@ -2,8 +2,6 @@ use std::fmt::Display;
 
 use anyhow::bail;
 
-use crate::gpu::TensorDesc;
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum DataType {
     I32,
@@ -43,6 +41,22 @@ impl DataType {
             DataType::F32 => "f32",
             DataType::F64 => "f64",
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct TensorDesc {
+    pub shape: Shape,
+    pub dtype: DataType,
+}
+
+impl TensorDesc {
+    pub(crate) fn new(shape: Shape, dtype: DataType) -> Self {
+        Self { shape, dtype }
+    }
+
+    pub(crate) fn size_of(&self) -> usize {
+        self.shape.numel().unwrap() * self.dtype.size_of()
     }
 }
 

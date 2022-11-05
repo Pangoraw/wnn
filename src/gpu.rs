@@ -6,25 +6,8 @@ use wgpu::util::DeviceExt;
 use crate::{
     compiler::{compile_node, effective_inputs, is_reshape_op, is_untracked_op},
     onnx,
-    shape::Shape,
     tensor::DataType,
 };
-
-#[derive(Clone)]
-pub struct TensorDesc {
-    pub shape: Shape,
-    pub dtype: DataType,
-}
-
-impl TensorDesc {
-    pub(crate) fn new(shape: Shape, dtype: DataType) -> Self {
-        Self { shape, dtype }
-    }
-
-    pub(crate) fn size_of(&self) -> usize {
-        self.shape.numel().unwrap() * self.dtype.size_of()
-    }
-}
 
 pub(crate) struct TensorStorage {
     desc: TensorDesc,

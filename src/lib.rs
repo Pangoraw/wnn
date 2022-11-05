@@ -6,9 +6,9 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::{
     compiler::{effective_inputs, is_reshape_op, is_untracked_op},
-    gpu::{Op, TensorDesc},
+    gpu::Op,
     shape::Shape,
-    tensor::DataType,
+    tensor::{DataType, TensorDesc},
 };
 
 mod analyzer;
