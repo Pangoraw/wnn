@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
         other => InitMode::File(other),
     };
 
-    let outputs = eval_graph(&model.graph, init_mode, args.dump_folder)?;
+    let outputs = pollster::block_on(eval_graph(&model.graph, init_mode, args.dump_folder))?;
 
     for (name, tensor) in outputs.iter() {
         let filename = format!("activations/{name}.npy");

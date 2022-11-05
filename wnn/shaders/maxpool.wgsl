@@ -31,7 +31,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         root_input_index
         + out_chan * {{ i_strides[0][1] }}u;
 
-    var tmpmax: T = -3.40282347e+38;
+    // https://gpuweb.github.io/gpuweb/wgsl/#floating-point-types
+    var tmpmax: T = -3.40282346638528859812e+38f;
     for (var i: u32 = 0u; i < {{ kernel_shape[0] }}u; i = i + 1u) {
         let tmp_y = out_y * {{ k_strides[0] }}u + i - {{ pads[0] }}u;
 

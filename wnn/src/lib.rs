@@ -16,8 +16,8 @@ mod compiler;
 mod gpu;
 pub mod npy;
 pub mod onnx;
-mod shape;
-mod tensor;
+pub mod shape;
+pub mod tensor;
 mod utils;
 
 #[derive(Debug)]
@@ -25,11 +25,13 @@ pub enum InitMode<'a> {
     Ones,
     Range,
     File(&'a str),
+    SliceF32(&'a [f32]),
+    SliceI64(&'a [f32]),
 }
 
 pub type EvalOutput<'a> = HashMap<&'a str, CPUTensor>;
 
-pub fn eval_graph<'a>(
+pub async fn eval_graph<'a>(
     graph: &'a onnx::GraphProto,
     init: InitMode<'_>,
     dump_folder: Option<PathBuf>,
@@ -113,7 +115,7 @@ pub fn eval_graph<'a>(
         .values()
         .any(|desc: &TensorDesc| matches!(desc.dtype, DataType::F16));
     let max_buffer_size = descs.values().map(|desc| desc.size_of() as u32).max();
-    let mut runner = pollster::block_on(gpu::Runner::new(max_buffer_size, enable_f16))?;
+    let mut runner = gpu::Runner::new(max_buffer_size, enable_f16).await?;
 
     for init in &graph.initializer {
         let desc = &descs[init.name()];
@@ -166,6 +168,8 @@ pub fn eval_graph<'a>(
                     .collect::<Vec<f64>>(),
             )
             .to_vec(),
+            (InitMode::SliceF32(slice), DataType::F32) => bytemuck::cast_slice(slice).to_vec(),
+            (InitMode::SliceI64(slice), DataType::I64) => bytemuck::cast_slice(slice).to_vec(),
             (InitMode::File(path), _) if path.ends_with(".npy") => {
                 let (read_shape, data) = npy::read_from_file(path)
                     .with_context(|| anyhow!("when open file {}", path))?;
@@ -181,13 +185,15 @@ pub fn eval_graph<'a>(
                 if path.ends_with(".jpeg") || path.ends_with(".jpg") =>
             {
                 let img = image::open(path)?;
+                log::debug!("height = {}, width = {}", img.height(), img.width());
+
                 let buf = img.to_rgb32f();
                 bytemuck::cast_slice(&buf).to_vec()
             }
             (init, dtype) => bail!("invalid initialization '{:?}' for type {dtype}", init),
         };
 
-        runner.add_node_with_init(input.name(), desc.clone(), bytemuck::cast_slice(&floats))?;
+        runner.add_node_with_init(input.name(), desc.clone(), &floats)?;
     }
 
     for node in graph
@@ -262,11 +268,13 @@ pub fn eval_graph<'a>(
         .collect::<anyhow::Result<Vec<Op>>>()?;
 
     log::info!("submitting ops");
+
+    #[cfg(not(target_arch = "wasm32"))]
     let time = std::time::Instant::now();
 
     // We submit things in chunks as it turns out submitting 500+ shaders at once
     // is not really appreciated by the GPU :((
-    let chunk_size = 10;
+    let chunk_size = ops.len();
 
     for chunk in ops.chunks(chunk_size) {
         let mut encoder = runner
@@ -291,41 +299,43 @@ pub fn eval_graph<'a>(
             std::fs::create_dir(folder)?;
         }
 
-        descs
-            .iter()
-            .map(|(inter, desc)| -> Result<(&str, CPUTensor)> {
-                let tensor = runner.get_storage(inter)?;
+        let mut outputs: Vec<(&str, CPUTensor)> = Vec::new();
+        for (inter, desc) in descs.iter() {
+            let tensor = runner.get_storage(inter)?;
 
-                let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
-                // let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
-                // npy::save_to_file(&format!("activations/{inter}.npy"), tensor_vec, &desc.shape)?;
-                Ok((inter, CPUTensor::new(desc.clone(), &tensor_bytes)))
-            })
-            .collect::<Result<Vec<(&str, CPUTensor)>>>()?
+            let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue).await;
+
+            // let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
+            // npy::save_to_file(&format!("activations/{inter}.npy"), tensor_vec, &desc.shape)?;
+            outputs.push((inter, CPUTensor::new(desc.clone(), &tensor_bytes)))
+        }
+
+        outputs
     } else {
-        graph
-            .output
-            .iter()
-            .map(|output| -> Result<(&str, CPUTensor)> {
-                let tensor = runner.get_storage(output.name())?;
-                let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue);
-                let desc = &descs[output.name()];
+        let mut outputs: Vec<(&str, CPUTensor)> = Vec::new();
+        for output in &graph.output {
+            let tensor = runner.get_storage(output.name())?;
+            let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue).await;
+            let desc = &descs[output.name()];
 
+            #[cfg(not(target_arch = "wasm32"))]
+            {
                 let elapsed = std::time::Instant::now().sub(time);
                 log::info!("run done ({:?})", elapsed);
+            }
 
-                // let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
+            // let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
 
-                // let out_shape = &descs[output.name()].shape;
-                // let filename = format!("activations/{}.npy", output.name());
-                // log::info!("saving to file {filename}");
+            // let out_shape = &descs[output.name()].shape;
+            // let filename = format!("activations/{}.npy", output.name());
+            // log::info!("saving to file {filename}");
 
-                // npy::save_to_file(&filename, tensor_vec, out_shape)
-                //     .with_context(|| anyhow!("failed to save to file {filename}"))?;
+            // npy::save_to_file(&filename, tensor_vec, out_shape)
+            //     .with_context(|| anyhow!("failed to save to file {filename}"))?;
 
-                Ok((output.name(), CPUTensor::new(desc.clone(), &tensor_bytes)))
-            })
-            .collect::<Result<Vec<(&str, CPUTensor)>>>()?
+            outputs.push((output.name(), CPUTensor::new(desc.clone(), &tensor_bytes)));
+        }
+        outputs
     };
     let outputs = HashMap::from_iter(outputs);
     log::info!("done!");

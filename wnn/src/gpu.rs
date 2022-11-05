@@ -49,23 +49,43 @@ impl TensorStorage {
         Self { desc, buffer }
     }
 
-    pub(crate) fn read_bytes(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
-        let read_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: self.size(),
-            mapped_at_creation: false,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        encoder.copy_buffer_to_buffer(&self.buffer, 0, &read_buf, 0, self.size());
-        queue.submit(std::iter::once(encoder.finish()));
+    pub(crate) async fn read_bytes(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
+        #[cfg(target_arch = "wasm32")] // Thanks wonnx <3
+        {
+            let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+            let slice = self.buffer.slice(..);
+            wgpu::util::DownloadBuffer::read_buffer(device, queue, &slice, move |buffer| {
+                tx.send(match buffer {
+                    Ok(bytes) => Ok(bytes.to_vec()),
+                    Err(error) => Err(anyhow!("failed to read bytes: {error}")),
+                })
+                .unwrap();
+            });
+            device.poll(wgpu::Maintain::Wait);
+            // The callback will have been called by now due to poll(Wait)
+            rx.receive().await.unwrap().unwrap()
+        }
 
-        let slice = read_buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::Maintain::Wait);
-        let out = slice.get_mapped_range().to_owned();
-        read_buf.unmap();
-        out
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let read_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: self.size(),
+                mapped_at_creation: false,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            });
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            encoder.copy_buffer_to_buffer(&self.buffer, 0, &read_buf, 0, self.size());
+            queue.submit(std::iter::once(encoder.finish()));
+
+            let slice = read_buf.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            device.poll(wgpu::Maintain::Wait);
+            let out = slice.get_mapped_range().to_owned();
+            read_buf.unmap();
+            out
+        }
     }
 }
 

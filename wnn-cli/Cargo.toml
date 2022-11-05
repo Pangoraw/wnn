@@ -1,0 +1,14 @@
+[package]
+name = "wnn-cli"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pollster = "0.2"
+protobuf = "3.2.0"
+env_logger = "0.9"
+anyhow = "1.0.65"
+structopt = "0.3.26"
+wnn = { path = "../wnn" }

@@ -160,12 +160,8 @@ fn parse_header(header: &str) -> IResult<&str, TensorDesc> {
     delimited(char('{'), parse_key_values, char('}'))(header)
 }
 
-pub(crate) fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<u8>)> {
-    let mut file = std::fs::OpenOptions::new().read(true).open(filename)?;
-    let mut content = Vec::new();
-    file.read_to_end(&mut content)?;
-
-    let (slice, header) = match extract_header(&content) {
+pub(crate) fn read_from_bytes(bytes: &[u8]) -> Result<(TensorDesc, &[u8])> {
+    let (slice, header) = match extract_header(bytes) {
         Ok((slice, header)) => (slice, header),
         Err(_) => bail!("failed to parse file header"),
     };
@@ -174,8 +170,17 @@ pub(crate) fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<u8>)> {
         Err(_) => bail!("failed to parse header"),
     };
 
-    let data = slice.to_vec();
-    assert!(data.len() == desc.shape.numel().unwrap());
+    assert!(slice.len() == desc.shape.numel().unwrap());
 
-    Ok((desc, data))
+    Ok((desc, slice))
+}
+
+pub(crate) fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<u8>)> {
+    let mut file = std::fs::OpenOptions::new().read(true).open(filename)?;
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)?;
+
+    let (desc, slice) = read_from_bytes(&content)?;
+
+    Ok((desc, slice.to_vec()))
 }
