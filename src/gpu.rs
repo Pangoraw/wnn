@@ -6,7 +6,7 @@ use wgpu::util::DeviceExt;
 use crate::{
     compiler::{compile_node, effective_inputs, is_reshape_op, is_untracked_op},
     onnx,
-    tensor::DataType,
+    tensor::{DataType, TensorDesc},
 };
 
 pub(crate) struct TensorStorage {
@@ -98,7 +98,7 @@ impl Op {
             bail!("f16 is currently not supported in naga");
         }
         let shader_source = shader
-            .to_wgsl(false)
+            .to_wgsl(enable_f16)
             .with_context(|| anyhow!("compiling shader for {}", node.name()))?;
 
         // println!("{shader_source}");
@@ -359,11 +359,7 @@ impl<'a> Runner<'a> {
                             force_readable,
                         ));
 
-                        println!(
-                            "{input}, {} {}",
-                            &self.slots[i].desc.size_of(),
-                            slots.len(),
-                        );
+                        println!("{input}, {} {}", &self.slots[i].desc.size_of(), slots.len(),);
 
                         slots.push(Slot { free: false });
                         self.which_slots.insert(input, self.slots.len() - 1);

@@ -2,6 +2,8 @@ use std::fmt::Display;
 
 use anyhow::bail;
 
+use crate::shape::Shape;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum DataType {
     I32,

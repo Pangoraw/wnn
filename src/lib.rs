@@ -332,10 +332,7 @@ pub fn eval_graph<'a>(
                 // npy::save_to_file(&filename, tensor_vec, out_shape)
                 //     .with_context(|| anyhow!("failed to save to file {filename}"))?;
 
-                Ok((
-                    output.name(),
-                    CPUTensor::new(desc.clone(), &tensor_bytes),
-                ))
+                Ok((output.name(), CPUTensor::new(desc.clone(), &tensor_bytes)))
             })
             .collect::<Result<Vec<(&str, CPUTensor)>>>()?
     };

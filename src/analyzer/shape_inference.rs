@@ -234,13 +234,6 @@ impl<'a> ShapeInferer<'a> {
                     .find_stored_shape(&node.input[1])
                     .ok_or_else(|| anyhow!("failed to find shape for tensor {}", node.input[1]))?;
 
-                match self.find_stored_shape(node.input[0].as_str()) {
-                    Some(s) if s.is_scalar() => {
-                        dbg!(self.find_constant(node.input[0].as_str()).unwrap());
-                    }
-                    _ => {}
-                }
-
                 for dim in 0isize..axes.ndims() as isize {
                     out_shape.unsqueeze(axes.as_int(dim)? as usize);
                 }
@@ -481,8 +474,6 @@ impl<'a> ShapeInferer<'a> {
                 let steps = self
                     .find_constant(node.input[3].as_str())
                     .ok_or_else(|| anyhow!("could not find steps {}", node.output[3]))?;
-
-                dbg!(&axes, starts, ends, steps);
 
                 let mut out = Shape::empty();
 
