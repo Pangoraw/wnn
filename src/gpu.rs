@@ -213,8 +213,6 @@ impl<'a> Runner<'a> {
     }
 
     /// Performs tensor allocation by grouping allocations of the same size together.
-    /// NOTE: We can probably do better by using bigger buffers to host smaller buffers.
-    ///       but this seems good enough for models where the same activation size can often be seen.
     /// TODO: put inits, inputs and output buffers inside the allocation line too?
     pub(crate) fn allocate_tensors(
         &mut self,
@@ -222,52 +220,77 @@ impl<'a> Runner<'a> {
         descs: &HashMap<&str, TensorDesc>,
         force_readable: bool,
     ) -> anyhow::Result<()> {
-        let mut starts = HashMap::new();
-        let mut ends = HashMap::new();
-
         let mut current_size = self.total_allocated_size();
 
+        #[derive(Clone)]
         struct Slot {
             free: bool,
         }
 
-        let mut slots: Vec<Slot> = Vec::new();
+        let pre_allocated_slots = self.slots.len();
+        let mut slots_availability: Vec<Slot> = std::iter::repeat(Slot { free: false })
+            .take(pre_allocated_slots)
+            .collect();
+        debug_assert!(slots_availability.len() == self.slots.len());
 
-        // Dumb allocation strategy to be able to save the tensor activations
-        if force_readable {
-            for node in nodes {
-                if is_reshape_op(node.op_type()) {
-                    let input = &node.input[0];
-                    let output = &node.output[0];
+        log::debug!(
+            "starting allocation with size {} on {} slots",
+            human_bytes::human_bytes(current_size as f64),
+            self.slots.len(),
+        );
 
-                    if self.which_slots.contains_key(input.as_str()) {
-                        self.which_slots
-                            .insert(output.as_str(), self.which_slots[input.as_str()]);
-                        continue;
-                    }
+        let aliases: HashMap<&str, &str> = HashMap::from_iter(
+            nodes
+                .iter()
+                .filter(|node| is_reshape_op(node.op_type()))
+                .map(|node| (node.output[0].as_str(), node.input[0].as_str())),
+        );
 
-                    let input_desc = descs[input.as_str()].clone();
-                    self.slots.push(TensorStorage::new(
-                        &self.device,
-                        input_desc,
-                        None,
-                        force_readable,
-                    ));
+        // Iterate the nodes in reverse to get liveness ranges for free.
+        // See https://www.mattkeeter.com/blog/2022-10-04-ssra/ for more details.
+        // If `force_readable` == true, then we never free the slots so that each value has its own
+        // buffer.
+        'nodes: for node in nodes.iter().rev() {
+            if is_untracked_op(node.op_type()) || is_reshape_op(node.op_type()) {
+                continue 'nodes;
+            }
 
-                    slots.push(Slot { free: false });
-                    self.which_slots.insert(input, slots.len() - 1);
-                    self.which_slots.insert(output, slots.len() - 1);
-
-                    continue;
+            // We allocate inputs first, so that no ops can run the risk of having the same buffer
+            // as inputs and outputs because output buffers are only freed once input buffers have
+            // been allocated for this particular node.
+            'inputs: for input in node.input.iter().take(effective_inputs(node)).map(|input| {
+                match aliases.get(input.as_str()) {
+                    Some(s) => s,
+                    None => input.as_str(),
+                }
+            }) {
+                // Input already has a buffer, skip it..
+                if self.which_slots.contains_key(input) {
+                    continue 'inputs;
                 }
 
-                for input in &node.input {
-                    if self.which_slots.contains_key(input.as_str())
-                        || !descs.contains_key(input.as_str())
-                    {
-                        continue;
-                    }
-                    let desc = descs[input.as_str()].clone();
+                // When node appears for the first time,
+                // reserve a free slot for it (1.1) if available (1.)
+                // or allocate one (1.2).
+
+                // 1. Find free slot
+                if let Some((slot_index, slot)) = slots_availability
+                    .iter_mut()
+                    .enumerate()
+                    .skip(pre_allocated_slots) // <- Don't use pre-allocated slots
+                    .find(|(slot_index, slot)| {
+                        slot.free
+                            && self.slots[*slot_index].desc.size_of() == descs[input].size_of()
+                    })
+                {
+                    log::debug!("reusing slot {slot_index} for {input}");
+
+                    // 1.1) Reserve free slot if available
+                    slot.free = false;
+                    self.which_slots.insert(input, slot_index);
+                } else {
+                    let desc = descs[input].clone();
+
                     current_size += desc.size_of() as u64;
                     if current_size > MAX_ALLOC_LIMIT {
                         bail!(
@@ -277,109 +300,64 @@ impl<'a> Runner<'a> {
                             input
                         );
                     }
-                    self.add_node(input.as_str(), desc, true)?;
-                }
 
-                for output in &node.output {
-                    if self.which_slots.contains_key(output.as_str())
-                        || !descs.contains_key(output.as_str())
-                    {
-                        continue;
-                    }
-                    let desc = descs[output.as_str()].clone();
-                    current_size += desc.size_of() as u64;
-                    if current_size > MAX_ALLOC_LIMIT {
-                        bail!(
-                            "out-of-memory error when allocating {} (currently at {}) for {}",
-                            human_bytes::human_bytes(desc.size_of() as f64),
-                            human_bytes::human_bytes(current_size as f64),
-                            output
-                        );
-                    }
-                    self.add_node(output.as_str(), desc, true)?;
+                    // 1.2) Allocate slot otherwise
+                    let slot_index = self.slots.len();
+
+                    log::debug!(
+                        "no slot found, allocating {} for {input} ({slot_index})",
+                        human_bytes::human_bytes(desc.size_of() as f64),
+                    );
+
+                    self.slots
+                        .push(TensorStorage::new(&self.device, desc, None, force_readable));
+                    slots_availability.push(Slot { free: false });
+
+                    debug_assert!(self.slots.len() == slots_availability.len());
+
+                    self.which_slots.insert(input, slot_index);
                 }
             }
 
-            return Ok(());
-        }
-
-        // Iterate the nodes in reverse to get liveness ranges for free.
-        // See https://www.mattkeeter.com/blog/2022-10-04-ssra/ for more details.
-        for (i, node) in nodes.iter().enumerate().rev() {
-            if is_untracked_op(node.op_type()) {
-                continue;
-            }
-
-            if is_reshape_op(node.op_type()) {
-                // For reshape ops, alias buffers
-                let output_slot = self.which_slots[node.output[0].as_str()];
-                self.which_slots.insert(node.input[0].as_str(), output_slot);
-
-                continue;
-            }
-
-            for input in node.input.iter().take(effective_inputs(node)) {
-                if self.which_slots.contains_key(input.as_str())
-                    || !descs.contains_key(input.as_str())
-                {
-                    continue;
+            'outputs: for output in
+                node.output
+                    .iter()
+                    .map(|output| match aliases.get(output.as_str()) {
+                        Some(s) => s,
+                        None => output.as_str(),
+                    })
+            {
+                if !self.which_slots.contains_key(output) {
+                    log::warn!("found output which was not used before {output}");
+                    continue 'outputs;
                 }
 
-                // When node appears for the first time,
-                // reserve a slot for it or allocate one.
-                if !ends.contains_key(input) {
-                    ends.insert(input, i);
+                debug_assert!(self.slots.len() == slots_availability.len());
 
-                    // 2. Find free slot
-                    if let Some((i, slot)) = slots.iter_mut().enumerate().find(|(i, slot)| {
-                        slot.free
-                            && self.slots[*i].desc.size_of() == descs[input.as_str()].size_of()
-                    }) {
-                        // 2.1) Reserve free slot if available
-                        slot.free = false;
-                        self.which_slots.insert(input.as_str(), i);
-                    } else {
-                        let desc = descs[input.as_str()].clone();
+                let slot_index = self.which_slots[output];
 
-                        current_size += desc.size_of() as u64;
-                        if current_size > MAX_ALLOC_LIMIT {
-                            bail!(
-                                "out-of-memory error when allocating {} (currently at {}) for {}",
-                                human_bytes::human_bytes(desc.size_of() as f64),
-                                human_bytes::human_bytes(current_size as f64),
-                                input
-                            );
-                        }
-
-                        // 2.2) Create slot otherwise
-                        self.slots.push(TensorStorage::new(
-                            &self.device,
-                            desc,
-                            None,
-                            force_readable,
-                        ));
-
-                        println!("{input}, {} {}", &self.slots[i].desc.size_of(), slots.len(),);
-
-                        slots.push(Slot { free: false });
-                        self.which_slots.insert(input, self.slots.len() - 1);
-                    }
-                }
-            }
-
-            for output in node.output.iter() {
-                if self.which_slots.contains_key(output.as_str())
-                    || !descs.contains_key(output.as_str())
-                {
-                    continue;
+                // If the slot was pre-allocated or we want every activation to have its own buffer,
+                // then we don't free it.
+                if slot_index < pre_allocated_slots || force_readable {
+                    continue 'outputs;
                 }
 
-                starts.insert(output, i);
+                log::debug!(
+                    "freeing slot {} for output {output}",
+                    self.which_slots[output]
+                );
 
-                // 1) When output appears mark slot as free
-                let slot: &mut Slot = &mut slots[self.which_slots[output.as_str()]];
+                // 2) When output appears mark slot as free
+                let slot: &mut Slot = &mut slots_availability[slot_index];
                 slot.free = true;
             }
+        }
+
+        for (output, input) in aliases {
+            if self.which_slots.contains_key(output) {
+                continue;
+            }
+            self.which_slots.insert(output, self.which_slots[input]);
         }
 
         if &std::env::var_os("DUMP_ALLOCS")

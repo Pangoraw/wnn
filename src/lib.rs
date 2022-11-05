@@ -123,6 +123,15 @@ pub fn eval_graph<'a>(
     }
 
     for input in &graph.input {
+        // Some inputs can also be present in initializers, skip those
+        if graph
+            .initializer
+            .iter()
+            .any(|init| init.name() == input.name())
+        {
+            continue;
+        }
+
         let desc = &descs[input.name()];
         let shape = &desc.shape;
         let dtype = &desc.dtype;
@@ -186,15 +195,6 @@ pub fn eval_graph<'a>(
             }
             (init, dtype) => bail!("invalid initialization '{:?}' for type {dtype}", init),
         };
-
-        // Some inputs can also be present in initializers, skip those
-        if graph
-            .initializer
-            .iter()
-            .any(|init| init.name() == input.name())
-        {
-            continue;
-        }
 
         runner.add_node_with_init(input.name(), desc.clone(), bytemuck::cast_slice(&floats))?;
     }
