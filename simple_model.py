@@ -22,7 +22,8 @@ class Model(nn.Module):
         # self.blocks[0].weight.data.fill_(1.2)
 
     def forward(self, x):
-        return self.blocks(x).int()
+        x = self.blocks(x).half()
+        return x.float()
         # return x.permute(1, 0)
 
 model = Model()

@@ -61,7 +61,7 @@ pub fn save_to_file(filename: &str, data: &[u8], desc: &TensorDesc) -> Result<us
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take, take_until};
 use nom::character::complete::{char, i64 as nom_i64, space0};
-use nom::combinator::opt;
+use nom::combinator::{map, opt};
 use nom::multi::separated_list0;
 use nom::number::complete::{le_u16, u8 as nom_u8};
 use nom::sequence::delimited;
@@ -104,8 +104,8 @@ fn parse_int_tuple(val: &str) -> IResult<&str, PythonVal> {
 }
 
 fn parse_bool(val: &str) -> IResult<&str, PythonVal> {
-    let (rest, val) = alt((tag("True"), tag("False")))(val)?;
-    Ok((rest, PythonVal::Bool(val == "True")))
+    let (rest, val) = alt((map(tag("True"), |_| true), map(tag("False"), |_| false)))(val)?;
+    Ok((rest, PythonVal::Bool(val)))
 }
 
 fn parse_str(val: &str) -> IResult<&str, &str> {
@@ -161,16 +161,21 @@ fn parse_header(header: &str) -> IResult<&str, TensorDesc> {
 }
 
 pub(crate) fn read_from_bytes(bytes: &[u8]) -> Result<(TensorDesc, &[u8])> {
-    let (slice, header) = match extract_header(bytes) {
-        Ok((slice, header)) => (slice, header),
-        Err(_) => bail!("failed to parse file header"),
+    let Ok((slice, header)) = extract_header(bytes) else {
+        bail!("failed to parse file header");
     };
-    let desc = match parse_header(header) {
-        Ok((_, desc)) => desc,
-        Err(_) => bail!("failed to parse header"),
+    let Ok((_, desc)) = parse_header(header) else {
+        bail!("failed to parse header");
     };
 
-    assert!(slice.len() == desc.shape.numel().unwrap());
+    if slice.len() != desc.size_of() {
+        bail!(
+            "invalid data slice of size {} for shape {} of type {}",
+            slice.len(),
+            desc.shape,
+            desc.dtype
+        );
+    }
 
     Ok((desc, slice))
 }
