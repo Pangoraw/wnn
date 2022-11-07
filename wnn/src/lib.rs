@@ -233,8 +233,14 @@ pub async fn eval_graph<'a>(
         runner.add_node(output.name(), desc.clone(), true)?;
     }
 
+    let allow_not_exact_size_buffers = false; // This can decrease the required amount of memory
     runner
-        .allocate_tensors(&graph.node, &descs, dump_folder.is_some())
+        .allocate_tensors(
+            &graph.node,
+            &descs,
+            dump_folder.is_some(),
+            allow_not_exact_size_buffers,
+        )
         .with_context(|| anyhow!("when allocating nodes"))?;
 
     log::info!(

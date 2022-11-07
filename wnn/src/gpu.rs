@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU64};
 
 use anyhow::{anyhow, bail, Context};
 use wgpu::util::DeviceExt;
@@ -149,7 +149,11 @@ impl Op {
                 .enumerate()
                 .map(|(i, tensor)| wgpu::BindGroupEntry {
                     binding: i as _,
-                    resource: tensor.buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &tensor.buffer,
+                        offset: 0,
+                        size: NonZeroU64::new(tensor.size()),
+                    }),
                 })
                 .collect::<Vec<wgpu::BindGroupEntry>>(),
             layout: &pipeline.get_bind_group_layout(0),
@@ -239,6 +243,7 @@ impl<'a> Runner<'a> {
         nodes: &'a [onnx::NodeProto],
         descs: &HashMap<&str, TensorDesc>,
         force_readable: bool,
+        allow_not_exact_size_buffers: bool,
     ) -> anyhow::Result<()> {
         let mut current_size = self.total_allocated_size();
 
@@ -300,7 +305,15 @@ impl<'a> Runner<'a> {
                     .skip(pre_allocated_slots) // <- Don't use pre-allocated slots
                     .find(|(slot_index, slot)| {
                         slot.free
-                            && self.slots[*slot_index].desc.size_of() == descs[input].size_of()
+                            && match self.slots[*slot_index]
+                                .desc
+                                .size_of()
+                                .cmp(&descs[input].size_of())
+                            {
+                                std::cmp::Ordering::Greater if allow_not_exact_size_buffers => true,
+                                std::cmp::Ordering::Equal => true,
+                                _ => false,
+                            }
                     })
                 {
                     log::debug!("reusing slot {slot_index} for {input}");
