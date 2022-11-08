@@ -15,6 +15,7 @@ use crate::{
 lazy_static! {
     static ref SHADER_FILES: HashMap<&'static str, &'static str> = HashMap::from_iter([
         ("matmul", include_str!("../shaders/matmul.wgsl")),
+        ("slice", include_str!("../shaders/slice.wgsl")),
         ("activation", include_str!("../shaders/activation.wgsl")),
         ("conv", include_str!("../shaders/conv.wgsl")),
         ("concat", include_str!("../shaders/concat.wgsl")),
@@ -287,6 +288,23 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
+        "Slice" => {
+            let out_shape = &descs[node.output[0].as_str()].shape;
+            context.insert("axes", &[3]);
+            context.insert("starts", &[0]);
+            context.insert("steps", &[1]);
+
+            let n_invocs = out_shape
+                .numel()
+                .ok_or_else(|| anyhow!("could not get concrete shape for {}", node.output[0]))?;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs as _);
+
+            ShaderInvocation {
+                file_name: "slice",
+                context,
+                dispatch: (dispatch_x as _, 1, 1),
+            }
+        }
         "Concat" => {
             let out_shape = &descs[node.output[0].as_str()].shape;
             let n_invocs = out_shape
@@ -530,7 +548,7 @@ pub(crate) fn compile_node(
 /// For some ops, the static analysis is used to get the parameters and therefore not all inputs
 /// are needed. That's why we only use a subset of the inputs in this case.
 pub(crate) fn effective_inputs(node: &NodeProto) -> usize {
-    if node.op_type() == "Resize" {
+    if node.op_type() == "Resize" || node.op_type() == "Slice" {
         1 // These ops are tracked statically so we remove tensor "params"
     } else {
         node.input.len()

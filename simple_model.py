@@ -1,7 +1,9 @@
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torchvision.models import resnet50
+from torchvision.models import resnet18, resnet50
+from PIL import Image
 
 resnet = resnet50(pretrained=True)
 
@@ -19,25 +21,31 @@ class Model(nn.Module):
             # nn.Sigmoid(),
             # nn.Softmax(-1),
         )
+        self.resnet = resnet18(pretrained=True)
         # self.blocks[0].weight.data.fill_(1.2)
 
     def forward(self, x):
-        x = self.blocks(x).half()
-        return x.float()
-        # return x.permute(1, 0)
+        x = x[:,:,:,:3]
+        x = x.permute(0,3,1,2)
+
+        x = x / (255. * torch.tensor([0.229, 0.224, 0.225])[None,:,None,None]) - \
+                        torch.tensor([0.485, 0.456, 0.406])[None,:,None,None]
+        return self.resnet(x)
+
 
 model = Model()
+model = model.eval()
 # model = resnet # Model()
 # x = torch.arange(0,16, dtype=torch.float32).view(4,4)
-x = torch.ones(1,3,224,224)
+#x = torch.ones(2,2)
 # x = torch.ones(1,4,64,64)
+x = torch.ones(1,224,224,4)
+#x = torch.arange(4, dtype=torch.float32).view(1,1,1,4)
 
-with torch.no_grad():
-    print(model(x))
-
-torch.onnx.export(
-    model,
-    x,
-    "./simple_model.onnx",
-    do_constant_folding=True,
-)
+if True:
+    torch.onnx.export(
+        model,
+        x,
+        "./simple_model.onnx",
+        do_constant_folding=True,
+    )

@@ -1,7 +1,6 @@
 use protobuf::Message;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_console_logger::DEFAULT_LOGGER;
-
 use wnn::{
     onnx,
     tensor::{CPUTensor, CPUTensorData},
@@ -21,17 +20,6 @@ pub struct ONNXModel {
 
 pub fn parse_model_(bytes: &[u8]) -> anyhow::Result<ONNXModel> {
     let model = onnx::ModelProto::parse_from_bytes(bytes)?;
-
-    log::info!(
-        "loaded model {} {:?} {} nodes",
-        model.producer_name(),
-        model.domain,
-        model.graph.node.len()
-    );
-    for node in &model.graph.node {
-        log::info!("node {}", node.name());
-    }
-
     let onnx_model = ONNXModel { model };
     Ok(onnx_model)
 }

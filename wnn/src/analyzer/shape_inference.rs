@@ -284,6 +284,10 @@ impl<'a> ShapeInferer<'a> {
                             bail!("invalid convolution {} o {}", x, w);
                         }
 
+                        if x.concrete_size(1)? != w.concrete_size(1)? {
+                            bail!("invalid convolution with input of size {x} and weights of size {w}");
+                        }
+
                         vec![w.concrete_size(2)? as i64, w.concrete_size(3)? as i64]
                     }
                     _ => bail!("kernel_shape not found for {op}"),
@@ -472,7 +476,7 @@ impl<'a> ShapeInferer<'a> {
                     .find_constant(node.input[2].as_str())
                     .ok_or_else(|| anyhow!("could not find steps {}", node.output[2]))?;
                 let steps = self
-                    .find_constant(node.input[3].as_str())
+                    .find_constant(node.input[4].as_str())
                     .ok_or_else(|| anyhow!("could not find steps {}", node.output[3]))?;
 
                 let mut out = Shape::empty();
@@ -487,10 +491,15 @@ impl<'a> ShapeInferer<'a> {
                     }) {
                         let start = starts[i];
                         let end = ends[i];
-                        let steps = steps[i];
+                        let step = steps[i];
+
+                        match (axes[i], start, end, step) {
+                            (3, 0, 3, 1) => {}
+                            _ => bail!("unsupported slice, currently only supported is [:,:,:,:3]"),
+                        }
 
                         let elems_along_dim =
-                            (end.clamp(0, x.concrete_size(dim)? as i64) - start) / steps;
+                            (end.clamp(0, x.concrete_size(dim)? as i64) - start) / step;
                         out.append_dim(crate::shape::Dimension::Concrete(elems_along_dim as usize));
                     } else {
                         out.append_dim(x.size(dim).clone());

@@ -17,6 +17,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var input_index = 0u;
     var rest = gdx;
     {% for dim in o_sizes[0] %}
+        {
         let dim_index = rest / {{ o_strides[0][loop.index0] }}u;
 
         {% if pi_strides[loop.index0] > 0 %}
@@ -24,6 +25,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         {% endif %}
 
         rest = rest % {{ o_strides[0][loop.index0] }}u;
+        }
     {% endfor %}
 
     output[gdx] = input[input_index];
