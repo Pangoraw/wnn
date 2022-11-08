@@ -1,6 +1,10 @@
 use tensor::CPUTensor;
 
-use std::{collections::HashMap, ops::Sub, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Sub,
+    path::PathBuf,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -55,12 +59,20 @@ pub async fn eval_graph<'a>(
         println!("{}{}::{}", output.name(), computed_shape, computed_type);
         if let Some(shape) = &output.type_.tensor_type().shape.0 {
             let real_shape = Shape::from_tensor_shape(shape);
+            let real_type = DataType::from_int(output.type_.tensor_type().elem_type())?;
             if computed_shape != &real_shape && real_shape.is_concrete() {
                 bail!(
                     "{}: computed {}, stored {}",
                     output.name(),
                     computed_shape,
                     real_shape
+                );
+            } else if computed_type != &real_type {
+                bail!(
+                    "{}: computed {}, stored {}",
+                    output.name(),
+                    computed_type,
+                    real_type,
                 );
             } else if real_shape.is_concrete() {
                 s += 1;
@@ -196,6 +208,7 @@ pub async fn eval_graph<'a>(
         runner.add_node_with_init(input.name(), desc.clone(), &floats)?;
     }
 
+    let mut constants = HashSet::new();
     for node in graph
         .node
         .iter()
@@ -225,6 +238,7 @@ pub async fn eval_graph<'a>(
             _ => bail!("unsupported Constant type '{}'", attr.name()),
         };
 
+        constants.insert(output.as_str());
         runner.add_node_with_init(output.as_str(), desc.clone(), data)?;
     }
 
@@ -307,12 +321,16 @@ pub async fn eval_graph<'a>(
 
         let mut outputs: Vec<(&str, CPUTensor)> = Vec::new();
         for (inter, desc) in descs.iter() {
-            let tensor = runner.get_storage(inter)?;
+            if constants.contains(inter)
+                || graph.initializer.iter().any(|init| &init.name() == inter)
+                || graph.input.iter().any(|input| &input.name() == inter)
+            {
+                continue;
+            }
 
+            let tensor = runner.get_storage(inter)?;
             let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue).await;
 
-            // let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
-            // npy::save_to_file(&format!("activations/{inter}.npy"), tensor_vec, &desc.shape)?;
             outputs.push((inter, CPUTensor::new(desc.clone(), &tensor_bytes)))
         }
 
@@ -329,15 +347,6 @@ pub async fn eval_graph<'a>(
                 let elapsed = std::time::Instant::now().sub(time);
                 log::info!("run done ({:?})", elapsed);
             }
-
-            // let tensor_vec: &[f32] = bytemuck::cast_slice(&tensor_bytes);
-
-            // let out_shape = &descs[output.name()].shape;
-            // let filename = format!("activations/{}.npy", output.name());
-            // log::info!("saving to file {filename}");
-
-            // npy::save_to_file(&filename, tensor_vec, out_shape)
-            //     .with_context(|| anyhow!("failed to save to file {filename}"))?;
 
             outputs.push((output.name(), CPUTensor::new(desc.clone(), &tensor_bytes)));
         }

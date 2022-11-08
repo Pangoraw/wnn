@@ -116,6 +116,7 @@ for i, k in enumerate(names):
     else:
         print(f"{k} ✅")
         topk = 2
+        """
         print(
             "ort",
             np.argsort(-b)[0,:topk],
@@ -126,4 +127,5 @@ for i, k in enumerate(names):
             np.argsort(-a)[0,:5],
             [classes[i] for i in np.argsort(-a)[0,:topk]],
         )
+        """
 
