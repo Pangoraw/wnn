@@ -25,7 +25,7 @@
     <h1>ML on the edge 🐶</h1 />
 
     <div style="display: none" class="warning">
-        Warning - WebGPU is not enabled in your browser. The demo will not work.
+        Warning - WebGPU is not enabled in your browser, make sure to <a href="https://developer.chrome.com/en/docs/web-platform/webgpu/#use">enable it</a> to see the demo.
     </div>
 
     <p>
@@ -56,8 +56,8 @@ class Model(torch.nn.Module):
         x = x.permute(0,3,1,2)
 
         # ToTensor() + Normalize()
-        x = x / 255 * torch.tensor([0.229, 0.224, 0.225])[None,:,None,None] - \
-                      torch.tensor([0.485, 0.456, 0.406])[None,:,None,None]
+        x = x / (255. * torch.tensor([0.229, 0.224, 0.225])[None,:,None,None]) - \
+                        torch.tensor([0.485, 0.456, 0.406])[None,:,None,None]
 
         # Apply the resnet
         return self.resnet(x)
