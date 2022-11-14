@@ -48,45 +48,6 @@ impl TensorStorage {
         });
         Self { desc, buffer }
     }
-
-    pub(crate) async fn read_bytes(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
-        #[cfg(target_arch = "wasm32")] // Thanks wonnx <3
-        {
-            let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
-            let slice = self.buffer.slice(..);
-            wgpu::util::DownloadBuffer::read_buffer(device, queue, &slice, move |buffer| {
-                tx.send(match buffer {
-                    Ok(bytes) => Ok(bytes.to_vec()),
-                    Err(error) => Err(anyhow!("failed to read bytes: {error}")),
-                })
-                .unwrap();
-            });
-            device.poll(wgpu::Maintain::Wait);
-            // The callback will have been called by now due to poll(Wait)
-            rx.receive().await.unwrap().unwrap()
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let read_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: self.size(),
-                mapped_at_creation: false,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            });
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-            encoder.copy_buffer_to_buffer(&self.buffer, 0, &read_buf, 0, self.size());
-            queue.submit(std::iter::once(encoder.finish()));
-
-            let slice = read_buf.slice(..);
-            slice.map_async(wgpu::MapMode::Read, |_| {});
-            device.poll(wgpu::Maintain::Wait);
-            let out = slice.get_mapped_range().to_owned();
-            read_buf.unmap();
-            out
-        }
-    }
 }
 
 /// A GPU operation to be run with inputs and outputs buffers.
@@ -511,5 +472,59 @@ impl<'a> Runner<'a> {
         self.which_slots.insert(name, tensor_idx);
         self.slots.push(storage);
         Ok(())
+    }
+
+    pub(crate) async fn read_bytes_from_name(&self, name: &str) -> anyhow::Result<Vec<u8>> {
+        let tensor = self.get_storage(name)?;
+        self.read_bytes(tensor).await
+    }
+
+    pub(crate) async fn read_bytes(&self, tensor: &TensorStorage) -> anyhow::Result<Vec<u8>> {
+        let read_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: tensor.size(),
+            mapped_at_creation: false,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_buffer_to_buffer(&tensor.buffer, 0, &read_buf, 0, tensor.size());
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+        let slice = read_buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            tx.send(res).unwrap();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+
+        match rx.receive().await {
+            Some(Ok(())) => {
+                let out = slice.get_mapped_range().to_owned();
+                read_buf.unmap();
+                Ok(out)
+            }
+            Some(Err(err)) => Err(anyhow!("error: reading buffer: {err}")),
+            _ => Err(anyhow!("error: reading buffer")),
+        }
+    }
+
+    pub(crate) fn submit_ops(&self, ops: &[Op]) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Compute Command Encoder"),
+            });
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass"),
+            });
+
+            for op in ops {
+                op.run(&mut compute_pass);
+            }
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
     }
 }

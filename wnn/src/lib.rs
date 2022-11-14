@@ -49,7 +49,7 @@ pub async fn eval_graph<'a>(
         ("width", shape::Dimension::Concrete(64)),
     ]);
 
-    let descs = analyzer::analyze_graph(&graph, &dim_mappings)?;
+    let descs = analyzer::analyze_graph(graph, &dim_mappings)?;
 
     let mut s = 0;
     for output in &graph.output {
@@ -292,27 +292,7 @@ pub async fn eval_graph<'a>(
     #[cfg(not(target_arch = "wasm32"))]
     let time = std::time::Instant::now();
 
-    // We submit things in chunks as it turns out submitting 500+ shaders at once
-    // is not really appreciated by the GPU :((
-    let chunk_size = ops.len();
-
-    for chunk in ops.chunks(chunk_size) {
-        let mut encoder = runner
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Compute Command Encoder"),
-            });
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Compute Pass"),
-            });
-
-            for op in chunk {
-                op.run(&mut compute_pass);
-            }
-        }
-        runner.queue.submit(std::iter::once(encoder.finish()));
-    }
+    runner.submit_ops(&ops);
 
     let outputs = if let Some(folder) = dump_folder {
         if !folder.exists() {
@@ -327,10 +307,7 @@ pub async fn eval_graph<'a>(
             {
                 continue;
             }
-
-            let tensor = runner.get_storage(inter)?;
-            let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue).await;
-
+            let tensor_bytes = runner.read_bytes_from_name(inter).await?;
             outputs.push((inter, CPUTensor::new(desc.clone(), &tensor_bytes)))
         }
 
@@ -338,8 +315,7 @@ pub async fn eval_graph<'a>(
     } else {
         let mut outputs: Vec<(&str, CPUTensor)> = Vec::new();
         for output in &graph.output {
-            let tensor = runner.get_storage(output.name())?;
-            let tensor_bytes = tensor.read_bytes(&runner.device, &runner.queue).await;
+            let tensor_bytes = runner.read_bytes_from_name(output.name()).await?;
             let desc = &descs[output.name()];
 
             #[cfg(not(target_arch = "wasm32"))]

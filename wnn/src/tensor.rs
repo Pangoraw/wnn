@@ -4,7 +4,7 @@ use anyhow::bail;
 
 use crate::shape::Shape;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DataType {
     I32,
     I64,
@@ -83,10 +83,10 @@ pub struct CPUTensor {
 impl CPUTensor {
     pub fn raw_data(&self) -> &[u8] {
         match &self.data {
-            CPUTensorData::I32(v) => bytemuck::cast_slice(&v),
-            CPUTensorData::I64(v) => bytemuck::cast_slice(&v),
-            CPUTensorData::F32(v) => bytemuck::cast_slice(&v),
-            CPUTensorData::F64(v) => bytemuck::cast_slice(&v),
+            CPUTensorData::I32(v) => bytemuck::cast_slice(v),
+            CPUTensorData::I64(v) => bytemuck::cast_slice(v),
+            CPUTensorData::F32(v) => bytemuck::cast_slice(v),
+            CPUTensorData::F64(v) => bytemuck::cast_slice(v),
         }
     }
 
