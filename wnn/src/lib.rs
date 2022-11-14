@@ -131,6 +131,12 @@ pub async fn eval_graph<'a>(
 
     for init in &graph.initializer {
         let desc = &descs[init.name()];
+        if matches!(desc.dtype, DataType::I64) {
+            // Don't allocate tensor of type i64 (it does not exist in wgpu) and
+            // therefore must be statically infered (see crate::analyzer).
+            continue;
+        }
+
         runner
             .add_init(init, desc.clone())
             .with_context(|| anyhow!("failed to create buffer for node {}", init.name()))?;
@@ -162,10 +168,6 @@ pub async fn eval_graph<'a>(
                 bytemuck::cast_slice(&std::iter::repeat(1.0).take(numel).collect::<Vec<f64>>())
                     .to_vec()
             }
-            (InitMode::Ones, DataType::I64) => {
-                bytemuck::cast_slice(&std::iter::repeat(1).take(numel).collect::<Vec<i64>>())
-                    .to_vec()
-            }
             (InitMode::Range, DataType::F32) => bytemuck::cast_slice(
                 &(0..numel)
                     .map(|i| i as f32)
@@ -181,7 +183,6 @@ pub async fn eval_graph<'a>(
             )
             .to_vec(),
             (InitMode::SliceF32(slice), DataType::F32) => bytemuck::cast_slice(slice).to_vec(),
-            (InitMode::SliceI64(slice), DataType::I64) => bytemuck::cast_slice(slice).to_vec(),
             (InitMode::File(path), _) if path.ends_with(".npy") => {
                 let (read_shape, data) = npy::read_from_file(path)
                     .with_context(|| anyhow!("when open file {}", path))?;
@@ -197,7 +198,6 @@ pub async fn eval_graph<'a>(
                 if path.ends_with(".jpeg") || path.ends_with(".jpg") =>
             {
                 let img = image::open(path)?;
-                log::debug!("height = {}, width = {}", img.height(), img.width());
 
                 let buf = img.to_rgb32f();
                 bytemuck::cast_slice(&buf).to_vec()

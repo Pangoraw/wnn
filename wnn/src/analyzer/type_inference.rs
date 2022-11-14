@@ -27,10 +27,10 @@ impl<'a> TypeInferer<'a> {
                     .attribute
                     .iter()
                     .find_map(|attr| match attr.name() {
-                        "value" => Some(DataType::from_int(attr.t.data_type()).unwrap()),
+                        "value" => Some(DataType::from_int(attr.t.data_type())),
                         _ => None,
                     })
-                    .unwrap_or(DataType::F32);
+                    .unwrap_or_else(|| Ok(DataType::F32))?;
                 vec![dtype]
             }
             "Constant" => {
@@ -38,14 +38,14 @@ impl<'a> TypeInferer<'a> {
                     .attribute
                     .iter()
                     .find_map(|attr| match attr.name() {
-                        "value_ints" => Some(DataType::F64),
-                        "value_floats" => Some(DataType::F32),
-                        "value" => Some(DataType::from_int(attr.t.data_type()).unwrap()),
-                        "value_float" => Some(DataType::F32),
-                        "value_int" => Some(DataType::I64),
+                        "value_ints" => Some(Ok(DataType::F64)),
+                        "value_floats" => Some(Ok(DataType::F32)),
+                        "value" => Some(DataType::from_int(attr.t.data_type())),
+                        "value_float" => Some(Ok(DataType::F32)),
+                        "value_int" => Some(Ok(DataType::I64)),
                         _ => None,
                     })
-                    .ok_or_else(|| anyhow!("could not infer type (no attr found)"))?;
+                    .unwrap_or_else(|| Err(anyhow!("could not infer type (no attr found)")))?;
                 vec![dtype]
             }
             "Shape" => vec![DataType::I64],

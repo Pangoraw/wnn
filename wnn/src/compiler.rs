@@ -9,7 +9,7 @@ use crate::{
     analyzer::TensorDescs,
     onnx::{self, NodeProto},
     tensor::DataType,
-    utils::{get_attr_float, get_attr_int, get_attr_ints, get_attr_string},
+    utils::{get_attr_float, get_attr_floats, get_attr_int, get_attr_ints, get_attr_string},
 };
 
 lazy_static! {
@@ -24,6 +24,11 @@ lazy_static! {
         ("broadcast", include_str!("../shaders/broadcast.wgsl")),
         ("resize", include_str!("../shaders/resize.wgsl")),
         ("softmax", include_str!("../shaders/softmax.wgsl")),
+        ("where", include_str!("../shaders/where.wgsl")),
+        (
+            "constantofshape",
+            include_str!("../shaders/constantofshape.wgsl")
+        ),
         (
             "globalaveragepool",
             include_str!("../shaders/globalaveragepool.wgsl")
@@ -305,6 +310,44 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
+        "ConstantOfShape" => {
+            let out_desc = &descs[node.output[0].as_str()];
+            let out_shape = &out_desc.shape;
+            let n_invocs = out_shape
+                .numel()
+                .ok_or_else(|| anyhow!("could not get concrete shape for {}", node.output[0]))?;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs as u64);
+
+            let (value, scalar) = match &out_desc.dtype {
+                DataType::F32 => (
+                    format!(
+                        "{}",
+                        get_attr_floats(node, "value")
+                            .and_then(|floats| floats.first())
+                            .unwrap_or(&0.)
+                    ),
+                    "f32",
+                ),
+                DataType::I64 => (
+                    format!(
+                        "{}",
+                        get_attr_ints(node, "value")
+                            .and_then(|ints| ints.first())
+                            .unwrap_or(&0),
+                    ),
+                    "i32",
+                ),
+                other => bail!("invalid data type for ConstantOfShape {other}"),
+            };
+            context.insert("value", &value);
+            context.insert("scalar", scalar);
+
+            ShaderInvocation {
+                file_name: "constantofshape",
+                context,
+                dispatch: (dispatch_x as _, 1, 1),
+            }
+        }
         "Concat" => {
             let out_shape = &descs[node.output[0].as_str()].shape;
             let n_invocs = out_shape
@@ -440,7 +483,18 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        op @ ("Mul" | "Add" | "Div" | "Sub") => {
+        "Where" => {
+            // Where(cond, a, b)
+            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
+
+            ShaderInvocation {
+                file_name: "where",
+                context,
+                dispatch: (dispatch_x as _, 1, 1),
+            }
+        }
+        op @ ("Equal" | "Mul" | "Add" | "Div" | "Sub") => {
             // TODO: make case with scalar inlining?
 
             let mut input_a = descs[node.input[0].as_str()].shape.clone();
@@ -490,9 +544,15 @@ pub(crate) fn compile_node(
                     "Mul" => "*",
                     "Div" => "/",
                     "Sub" => "-",
+                    "Equal" => "==",
                     _ => unreachable!(),
                 },
             );
+
+            if op == "Equal" {
+                log::warn!("compiling Equal: probably not supported (bool is not numeric)");
+                context.insert("cast", &true);
+            }
 
             ShaderInvocation {
                 file_name: "broadcast",
@@ -539,7 +599,7 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        op => unimplemented!("{op}"),
+        op => bail!("unimplemented {op}"),
     };
 
     Ok(invoc)
@@ -548,10 +608,10 @@ pub(crate) fn compile_node(
 /// For some ops, the static analysis is used to get the parameters and therefore not all inputs
 /// are needed. That's why we only use a subset of the inputs in this case.
 pub(crate) fn effective_inputs(node: &NodeProto) -> usize {
-    if node.op_type() == "Resize" || node.op_type() == "Slice" {
-        1 // These ops are tracked statically so we remove tensor "params"
-    } else {
-        node.input.len()
+    match node.op_type() {
+        "ConstantOfShape" => 0,
+        "Resize" | "Slice" => 1, // These ops are tracked statically so we remove tensor "params"
+        _ => node.input.len(),
     }
 }
 
@@ -562,8 +622,8 @@ pub(crate) fn is_untracked_op(op_type: &str) -> bool {
     matches!(op_type, "Shape" | "Constant")
 }
 
-// We apply a special treatment to these ops since there is no data change
-// to the underlying buffer.
+/// We apply a special treatment to these ops since there is no data change
+/// to the underlying buffer.
 pub(crate) fn is_reshape_op(op_type: &str) -> bool {
     matches!(
         op_type,

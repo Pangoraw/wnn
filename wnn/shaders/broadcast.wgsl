@@ -1,4 +1,5 @@
 type T = {{ scalar }};
+type T2 = {% if scalar_output %}{{ scalar_output }}{% else %}{{ scalar }}{% endif %};
 
 @group(0) @binding(0)
 var<storage, read> input_left: array<T>;
@@ -7,7 +8,7 @@ var<storage, read> input_left: array<T>;
 var<storage, read> input_right: array<T>;
 
 @group(0) @binding(2)
-var<storage, read_write> output: array<T>;
+var<storage, read_write> output: array<T2>;
 
 @compute @workgroup_size({{ workgroup_x }})
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -39,6 +40,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         {% endif %}
     {% endfor %}
 
-    output[gdx] = input_left[index_left] {{ op }} input_right[index_right];
+    output[gdx] = {% if cast %}{{ scalar }}{% endif %}(input_left[index_left] {{ op }} input_right[index_right]);
     {% endfor %}
 }

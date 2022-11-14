@@ -101,7 +101,7 @@ impl<'a> ShapeInferer<'a> {
                 }
                 vec![out_dim]
             }
-            op @ ("Mul" | "Add" | "Div" | "Sub") => {
+            op @ ("Mul" | "Pow" | "Add" | "Div" | "Sub") => {
                 let input_shapes = node
                     .input
                     .iter()
@@ -127,6 +127,7 @@ impl<'a> ShapeInferer<'a> {
                             "Add" => a + b,
                             "Sub" => a - b,
                             "Div" => a / b,
+                            "Pow" => a ^ b,
                             _ => 0,
                         })
                         .collect();
@@ -245,7 +246,24 @@ impl<'a> ShapeInferer<'a> {
                 let data = &self.shapes[node.input[0].as_str()];
                 let indices = &self.shapes[node.input[1].as_str()];
 
-                let out_shape = if indices.is_scalar() {
+                if let (Some(data), Some(index)) = (
+                    self.find_constant(node.input[0].as_str()),
+                    self.find_constant(node.input[1].as_str()),
+                ) {
+                    let out_const = index
+                        .iter()
+                        .map(|idx| {
+                            if *idx < 0 {
+                                data[(data.len() as i64 + *idx) as usize]
+                            } else {
+                                data[*idx as usize]
+                            }
+                        })
+                        .collect();
+                    self.constants.insert(node.output[0].as_str(), out_const);
+                }
+
+                let out_shape = if matches!(indices.numel(), Some(1)) {
                     let mut out_shape = Shape::empty();
                     for dim in 0..data.ndims() as i64 {
                         if dim == axis {
@@ -448,8 +466,10 @@ impl<'a> ShapeInferer<'a> {
             "BatchNormalization"
             | "InstanceNormalization"
             | "Cast"
-            | "Relu"
             | "LeakyRelu"
+            | "Relu"
+            | "Erf"
+            | "Sqrt"
             | "Sigmoid"
             | "Softmax"
             | "Tanh"
@@ -471,14 +491,17 @@ impl<'a> ShapeInferer<'a> {
 
                 let starts = self
                     .find_constant(node.input[1].as_str())
-                    .ok_or_else(|| anyhow!("could not find steps {}", node.output[1]))?;
+                    .ok_or_else(|| anyhow!("could not find starts {}", node.input[1]))?;
                 let ends = self
                     .find_constant(node.input[2].as_str())
-                    .ok_or_else(|| anyhow!("could not find steps {}", node.output[2]))?;
-                let steps = self
-                    .find_constant(node.input[4].as_str())
-                    .ok_or_else(|| anyhow!("could not find steps {}", node.output[3]))?;
+                    .ok_or_else(|| anyhow!("could not find ends {}", node.input[2]))?;
 
+                let default_steps = std::iter::repeat(1).take(axes.len()).collect::<Vec<i64>>();
+                let steps = node
+                    .input
+                    .get(4)
+                    .and_then(|input| self.find_constant(input.as_str()))
+                    .unwrap_or_else(|| &default_steps);
                 let mut out = Shape::empty();
 
                 for dim in 0isize..x.ndims() as isize {
@@ -494,6 +517,7 @@ impl<'a> ShapeInferer<'a> {
                         let step = steps[i];
 
                         match (axes[i], start, end, step) {
+                            _ => {}
                             (3, 0, 3, 1) => {}
                             _ => bail!("unsupported slice, currently only supported is [:,:,:,:3]"),
                         }
@@ -524,15 +548,6 @@ impl<'a> ShapeInferer<'a> {
                         .map(|(a, (b, c))| if *a == 1 { *b } else { *c })
                         .collect();
                     self.constants.insert(node.output[0].as_str(), d);
-                } else {
-                    log::debug!(
-                        "nope :'( {:?}",
-                        (
-                            self.find_constant(node.input[0].as_str()).is_some(),
-                            self.find_constant(node.input[1].as_str()).is_some(),
-                            self.find_constant(node.input[2].as_str()).is_some(),
-                        )
-                    );
                 }
 
                 if a != b || b != c {
@@ -554,17 +569,30 @@ impl<'a> ShapeInferer<'a> {
                 ) {
                     let out = a.iter().zip(b).map(|(a, b)| (a == b) as i64).collect();
                     self.constants.insert(node.output[0].as_str(), out);
-                } else {
-                    log::debug!(
-                        "nope :'( {:?}",
-                        (
-                            self.find_constant(node.input[0].as_str()).is_some(),
-                            self.find_constant(node.input[1].as_str()).is_some(),
-                        )
-                    );
                 }
 
                 vec![a.clone()]
+            }
+            "ReduceMean" => {
+                let axes =
+                    get_attr_ints(node, "axes").ok_or_else(|| anyhow!("failed to find axes"))?;
+                let keepdims = get_attr_int(node, "keepdims").unwrap_or(1);
+
+                match keepdims {
+                    1 => {}
+                    0 | _ => bail!("keepdims = 1 is only supported"),
+                }
+
+                let data = &self.shapes[node.input[0].as_str()];
+
+                let mut out = data.clone();
+                for dim in axes {
+                    if keepdims == 1 {
+                        out.set_dim(*dim as isize, crate::shape::Dimension::Concrete(1));
+                    }
+                }
+
+                vec![out]
             }
             "Identity" => {
                 let input_shape = self.shapes[node.input[0].as_str()].clone();

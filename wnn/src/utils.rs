@@ -1,3 +1,7 @@
+use std::io::{Read, Seek};
+
+use anyhow::{bail, Context};
+
 use crate::onnx;
 
 pub(crate) fn get_attr_int(node: &onnx::NodeProto, name: &str) -> Option<i64> {
@@ -10,6 +14,16 @@ pub(crate) fn get_attr_ints<'a>(node: &'a onnx::NodeProto, name: &str) -> Option
     node.attribute.iter().find_map(|attr| {
         if attr.name() == name {
             Some(attr.ints.as_ref())
+        } else {
+            None
+        }
+    })
+}
+
+pub(crate) fn get_attr_floats<'a>(node: &'a onnx::NodeProto, name: &str) -> Option<&'a [f32]> {
+    node.attribute.iter().find_map(|attr| {
+        if attr.name() == name {
+            Some(attr.floats.as_ref())
         } else {
             None
         }
@@ -32,15 +46,37 @@ pub(crate) fn get_attr_string<'a>(node: &'a onnx::NodeProto, name: &str) -> Opti
     })
 }
 
-pub(crate) fn _external_data(tensor: &onnx::TensorProto) {
-    if matches!(
-        tensor.data_location(),
-        onnx::tensor_proto::DataLocation::EXTERNAL
-    ) {
-        for key in &tensor.external_data {
-            println!("{} => {}", key.key(), key.value());
+/// Reads the tensor data into a vector from the external file it is stored in.
+pub(crate) fn external_data(tensor: &onnx::TensorProto) -> anyhow::Result<Vec<u8>> {
+    assert!(tensor.data_location() == onnx::tensor_proto::DataLocation::EXTERNAL);
+
+    let mut location = "";
+    let mut offset = 0;
+    let mut bytes_length = 0;
+
+    for keyval in &tensor.external_data {
+        match keyval.key() {
+            "location" => location = keyval.value(),
+            "offset" => offset = u64::from_str_radix(keyval.value(), 10)?,
+            "length" => bytes_length = usize::from_str_radix(keyval.value(), 10)?,
+            other => bail!("invalid key '{other}'"),
         }
     }
+
+    // TODO: Optimize by keeping the file descriptor open
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&format!("/home/paul/Projects/ONNX.jl/{location}"))
+        .with_context(|| anyhow::anyhow!("when open file '{location}'"))?;
+    file.seek(std::io::SeekFrom::Start(offset))?;
+
+    let mut content = Vec::with_capacity(bytes_length);
+    unsafe {
+        content.set_len(bytes_length);
+    }
+    file.read_exact(&mut content)?;
+
+    Ok(content)
 }
 
 // There is sometimes an issue where the data is not actually in the

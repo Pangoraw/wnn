@@ -7,6 +7,7 @@ use crate::{
     compiler::{compile_node, effective_inputs, is_reshape_op, is_untracked_op},
     onnx,
     tensor::{DataType, TensorDesc},
+    utils::external_data,
 };
 
 pub(crate) struct TensorStorage {
@@ -65,7 +66,8 @@ impl Op {
         node: &onnx::NodeProto,
         descs: &HashMap<&str, TensorDesc>,
     ) -> anyhow::Result<Self> {
-        let shader = compile_node(node, descs)?;
+        let shader = compile_node(node, descs)
+            .with_context(|| anyhow!("compiling shader for {}", node.name()))?;
         let enable_f16 = node
             .input
             .iter()
@@ -80,7 +82,7 @@ impl Op {
         }
         let shader_source = shader
             .to_wgsl(enable_f16)
-            .with_context(|| anyhow!("compiling shader for {}", node.name()))?;
+            .with_context(|| anyhow!("expanding shader for {}", node.name()))?;
 
         // println!("{shader_source}");
 
@@ -144,7 +146,7 @@ pub(crate) struct Runner<'a> {
     which_slots: HashMap<&'a str, usize>,
 }
 
-const MAX_ALLOC_LIMIT: u64 = 3_500_000_000;
+const MAX_ALLOC_LIMIT: u64 = 7_500_000_000;
 
 impl<'a> Runner<'a> {
     pub(crate) async fn new(
@@ -434,6 +436,11 @@ impl<'a> Runner<'a> {
         tensor: &'a onnx::TensorProto,
         desc: TensorDesc,
     ) -> anyhow::Result<()> {
+        // TODO: Move this function out of gpu::Runner.
+        if tensor.data_location() == crate::onnx::tensor_proto::DataLocation::EXTERNAL {
+            return self.add_node_with_init(tensor.name(), desc, &external_data(tensor)?);
+        }
+
         let raw_data = match desc.dtype {
             DataType::F32 if !tensor.float_data.is_empty() => {
                 bytemuck::cast_slice(&tensor.float_data)
@@ -446,7 +453,7 @@ impl<'a> Runner<'a> {
             }
             _ => tensor.raw_data(),
         };
-        self.add_node_with_init(tensor.name(), desc, raw_data)
+        return self.add_node_with_init(tensor.name(), desc, raw_data);
     }
 
     pub(crate) fn add_node_with_init(
@@ -464,8 +471,11 @@ impl<'a> Runner<'a> {
                 desc.dtype,
             );
         }
+
         if self.which_slots.contains_key(name) {
-            bail!("tensor {} was already inserted in runner", name);
+            log::warn!("tensor {} was already inserted in runner", name);
+            return Ok(());
+            // bail!("tensor {} was already inserted in runner", name);
         }
         let storage = TensorStorage::new_with_init(&self.device, raw_data, desc, Some(name));
         let tensor_idx = self.which_slots.len();
