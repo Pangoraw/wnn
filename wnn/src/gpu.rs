@@ -142,6 +142,7 @@ pub(crate) struct Runner<'a> {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
 
+    outputs: HashMap<&'a str, wgpu::Buffer>,
     slots: Vec<TensorStorage>,
     which_slots: HashMap<&'a str, usize>,
 }
@@ -190,6 +191,7 @@ impl<'a> Runner<'a> {
         Ok(Self {
             device,
             queue,
+            outputs: HashMap::new(),
             slots: Vec::new(),
             which_slots: HashMap::new(),
         })
@@ -197,6 +199,11 @@ impl<'a> Runner<'a> {
 
     pub(crate) fn total_allocated_size(&self) -> u64 {
         self.slots.iter().map(|tensor| tensor.size()).sum::<u64>()
+            + self
+                .outputs
+                .values()
+                .map(|buffer| buffer.size())
+                .sum::<u64>()
     }
 
     /// Performs tensor allocation by grouping allocations of the same size together.
@@ -420,9 +427,20 @@ impl<'a> Runner<'a> {
         desc: TensorDesc,
         is_output: bool,
     ) -> anyhow::Result<()> {
+        let buf_size = desc.size_of();
         let storage = TensorStorage::new(&self.device, desc, Some(name), is_output);
         if self.which_slots.contains_key(name) {
             anyhow::bail!("node {} was already inserted in runner", name);
+        }
+
+        if is_output {
+            let read_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Read buffer {name}")),
+                mapped_at_creation: false,
+                size: buf_size as _,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            });
+            self.outputs.insert(name, read_buffer);
         }
 
         let tensor_idx = self.slots.len();
@@ -485,22 +503,11 @@ impl<'a> Runner<'a> {
     }
 
     pub(crate) async fn read_bytes_from_name(&self, name: &str) -> anyhow::Result<Vec<u8>> {
-        let tensor = self.get_storage(name)?;
-        self.read_bytes(tensor).await
+        self.read_bytes(name).await
     }
 
-    pub(crate) async fn read_bytes(&self, tensor: &TensorStorage) -> anyhow::Result<Vec<u8>> {
-        let read_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: tensor.size(),
-            mapped_at_creation: false,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        });
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        encoder.copy_buffer_to_buffer(&tensor.buffer, 0, &read_buf, 0, tensor.size());
-        self.queue.submit(std::iter::once(encoder.finish()));
+    pub(crate) async fn read_bytes(&self, name: &str) -> anyhow::Result<Vec<u8>> {
+        let read_buf = &self.outputs[name];
 
         let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
         let slice = read_buf.slice(..);
@@ -535,6 +542,18 @@ impl<'a> Runner<'a> {
                 op.run(&mut compute_pass);
             }
         }
+
+        for (output, target_buffer) in self.outputs.iter() {
+            let source_buffer = &self.slots[self.which_slots[output]];
+            encoder.copy_buffer_to_buffer(
+                &source_buffer.buffer,
+                0,
+                target_buffer,
+                0,
+                target_buffer.size(),
+            );
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
     }
 }
