@@ -235,6 +235,10 @@ impl<'a> ShapeInferer<'a> {
                     .find_stored_shape(&node.input[1])
                     .ok_or_else(|| anyhow!("failed to find shape for tensor {}", node.input[1]))?;
 
+                if let Some(constant) = self.find_constant(node.input[0].as_str()) {
+                    self.constants.insert(&node.output[0], constant.to_vec());
+                }
+
                 for dim in 0isize..axes.ndims() as isize {
                     out_shape.unsqueeze(axes.as_int(dim)? as usize);
                 }
@@ -449,8 +453,15 @@ impl<'a> ShapeInferer<'a> {
             "Shape" => {
                 assert!(node.input.len() == 1);
                 let input_shape = &self.shapes[node.input[0].as_str()];
+
                 self.known_shapes
                     .insert(node.output[0].as_str(), input_shape.clone());
+
+                if input_shape.is_concrete() {
+                    self.constants
+                        .insert(node.output[0].as_str(), input_shape.as_ints()?);
+                }
+
                 vec![Shape::from(&[input_shape.ndims() as _])]
             }
             "GlobalAveragePool" => {

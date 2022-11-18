@@ -502,10 +502,6 @@ impl<'a> Runner<'a> {
         Ok(())
     }
 
-    pub(crate) async fn read_bytes_from_name(&self, name: &str) -> anyhow::Result<Vec<u8>> {
-        self.read_bytes(name).await
-    }
-
     pub(crate) async fn read_bytes(&self, name: &str) -> anyhow::Result<Vec<u8>> {
         let read_buf = &self.outputs[name];
 

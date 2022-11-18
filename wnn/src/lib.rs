@@ -307,7 +307,7 @@ pub async fn eval_graph<'a>(
             {
                 continue;
             }
-            let tensor_bytes = runner.read_bytes_from_name(inter).await?;
+            let tensor_bytes = runner.read_bytes(inter).await?;
             outputs.push((inter, CPUTensor::new(desc.clone(), &tensor_bytes)))
         }
 
@@ -315,7 +315,7 @@ pub async fn eval_graph<'a>(
     } else {
         let mut outputs: Vec<(&str, CPUTensor)> = Vec::new();
         for output in &graph.output {
-            let tensor_bytes = runner.read_bytes_from_name(output.name()).await?;
+            let tensor_bytes = runner.read_bytes(output.name()).await?;
             let desc = &descs[output.name()];
 
             #[cfg(not(target_arch = "wasm32"))]
