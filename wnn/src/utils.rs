@@ -57,8 +57,8 @@ pub(crate) fn external_data(tensor: &onnx::TensorProto) -> anyhow::Result<Vec<u8
     for keyval in &tensor.external_data {
         match keyval.key() {
             "location" => location = keyval.value(),
-            "offset" => offset = u64::from_str_radix(keyval.value(), 10)?,
-            "length" => bytes_length = usize::from_str_radix(keyval.value(), 10)?,
+            "offset" => offset = keyval.value().parse::<u64>()?,
+            "length" => bytes_length = keyval.value().parse::<usize>()?,
             other => bail!("invalid key '{other}'"),
         }
     }
@@ -70,10 +70,7 @@ pub(crate) fn external_data(tensor: &onnx::TensorProto) -> anyhow::Result<Vec<u8
         .with_context(|| anyhow::anyhow!("when open file '{location}'"))?;
     file.seek(std::io::SeekFrom::Start(offset))?;
 
-    let mut content = Vec::with_capacity(bytes_length);
-    unsafe {
-        content.set_len(bytes_length);
-    }
+    let mut content = vec![0; bytes_length];
     file.read_exact(&mut content)?;
 
     Ok(content)

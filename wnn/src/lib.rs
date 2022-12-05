@@ -9,10 +9,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::{
-    compiler::{effective_inputs, is_reshape_op, is_untracked_op},
-    gpu::Op,
-    shape::Shape,
-    tensor::{DataType, TensorDesc},
+    analyzer::LogicalOpType, compiler::is_untracked_op, gpu::Op, shape::Shape, tensor::DataType,
 };
 
 mod analyzer;
@@ -33,13 +30,13 @@ pub enum InitMode<'a> {
     SliceI64(&'a [f32]),
 }
 
-pub type EvalOutput<'a> = HashMap<&'a str, CPUTensor>;
+pub type EvalOutput = HashMap<String, CPUTensor>;
 
-pub async fn eval_graph<'a>(
-    graph: &'a onnx::GraphProto,
+pub async fn eval_graph(
+    graph: &onnx::GraphProto,
     init: InitMode<'_>,
     dump_folder: Option<PathBuf>,
-) -> Result<EvalOutput<'a>> {
+) -> Result<EvalOutput> {
     // Concretize common dimensions, TODO: pass as arg
     let dim_mappings = HashMap::from_iter([
         ("N", shape::Dimension::Concrete(1)),
@@ -49,11 +46,11 @@ pub async fn eval_graph<'a>(
         ("width", shape::Dimension::Concrete(64)),
     ]);
 
-    let descs = analyzer::analyze_graph(graph, &dim_mappings)?;
+    let log_graph = analyzer::LogicalGraph::new(graph, &dim_mappings)?;
 
     let mut s = 0;
     for output in &graph.output {
-        let desc = &descs[output.name()];
+        let desc = log_graph.get_desc_name(output.name());
         let computed_shape = &desc.shape;
         let computed_type = &desc.dtype;
         println!("{}{}::{}", output.name(), computed_shape, computed_type);
@@ -83,7 +80,7 @@ pub async fn eval_graph<'a>(
     // Validation
     for val in &graph.value_info {
         if let Some(shape) = &val.type_.tensor_type().shape.0 {
-            let desc = &descs[val.name()];
+            let desc = log_graph.get_desc_name(val.name());
             let computed_shape = &desc.shape;
             let info_shape = Shape::from_tensor_shape(shape);
             let computed_type = &desc.dtype;
@@ -123,14 +120,16 @@ pub async fn eval_graph<'a>(
         );
     }
 
-    let enable_f16 = descs
-        .values()
-        .any(|desc: &TensorDesc| matches!(desc.dtype, DataType::F16));
-    let max_buffer_size = descs.values().map(|desc| desc.size_of() as u32).max();
+    let enable_f16 = false;
+
+    // descs
+    // .values()
+    // .any(|desc: &TensorDesc| matches!(desc.dtype, DataType::F16));
+    let max_buffer_size = log_graph.max_buffer_size();
     let mut runner = gpu::Runner::new(max_buffer_size, enable_f16).await?;
 
     for init in &graph.initializer {
-        let desc = &descs[init.name()];
+        let desc = log_graph.get_desc_name(init.name());
         if matches!(desc.dtype, DataType::I64) {
             // Don't allocate tensor of type i64 (it does not exist in wgpu) and
             // therefore must be statically infered (see crate::analyzer).
@@ -138,7 +137,13 @@ pub async fn eval_graph<'a>(
         }
 
         runner
-            .add_init(init, desc.clone())
+            .add_init(
+                init,
+                &log_graph
+                    .find_buffer_handle(init.name())
+                    .ok_or_else(|| anyhow!("could not find buffer handle for {}", init.name()))?,
+                desc.clone(),
+            )
             .with_context(|| anyhow!("failed to create buffer for node {}", init.name()))?;
     }
 
@@ -152,7 +157,7 @@ pub async fn eval_graph<'a>(
             continue;
         }
 
-        let desc = &descs[input.name()];
+        let desc = log_graph.get_desc_name(input.name());
         let shape = &desc.shape;
         let dtype = &desc.dtype;
 
@@ -205,7 +210,13 @@ pub async fn eval_graph<'a>(
             (init, dtype) => bail!("invalid initialization '{:?}' for type {dtype}", init),
         };
 
-        runner.add_node_with_init(input.name(), desc.clone(), &floats)?;
+        runner.add_node_with_init(
+            &log_graph
+                .find_buffer_handle(input.name())
+                .ok_or_else(|| anyhow!("could not find buffer for {}", input.name()))?,
+            desc.clone(),
+            &floats,
+        )?;
     }
 
     let mut constants = HashSet::new();
@@ -215,7 +226,7 @@ pub async fn eval_graph<'a>(
         .filter(|node| node.op_type() == "Constant")
     {
         let output = &node.output[0];
-        let desc = &descs[output.as_str()];
+        let desc = log_graph.get_desc_name(output.as_str());
 
         let Some(attr) = node.attribute.first() else {
             bail!("attribute not provided for Constant {}", node.name());
@@ -239,19 +250,30 @@ pub async fn eval_graph<'a>(
         };
 
         constants.insert(output.as_str());
-        runner.add_node_with_init(output.as_str(), desc.clone(), data)?;
+        runner.add_node_with_init(
+            &log_graph
+                .find_buffer_handle(output.as_str())
+                .ok_or_else(|| anyhow!("could not find buffer for {}", output.as_str()))?,
+            desc.clone(),
+            data,
+        )?;
     }
 
     for output in &graph.output {
-        let desc = &descs[output.name()];
-        runner.add_node(output.name(), desc.clone(), true)?;
+        let desc = log_graph.get_desc_name(output.name());
+        runner.add_node(
+            &log_graph
+                .find_buffer_handle(output.name())
+                .ok_or_else(|| anyhow!("could not find buffer for {}", output.name()))?,
+            desc.clone(),
+            true,
+        )?;
     }
 
     let allow_not_exact_size_buffers = false; // This can decrease the required amount of memory
     runner
         .allocate_tensors(
-            &graph.node,
-            &descs,
+            &log_graph,
             dump_folder.is_some(),
             allow_not_exact_size_buffers,
         )
@@ -265,24 +287,26 @@ pub async fn eval_graph<'a>(
 
     log::info!("building ops");
 
-    let ops = graph
-        .node
+    let ops = log_graph
+        .ops
         .iter()
-        .filter(|node| !is_reshape_op(node.op_type()) && !is_untracked_op(node.op_type()))
+        .filter(|op| {
+            !matches!(op.op_type(), LogicalOpType::ReshapeOnly) && !is_untracked_op(op.op_type())
+        })
         .map(|node| {
             Op::new(
                 &runner.device,
-                node.input
+                node.inputs
                     .iter()
-                    .take(effective_inputs(node))
+                    // .take(effective_inputs(node))
                     .map(|input| runner.get_storage(input))
                     .collect::<anyhow::Result<Vec<&gpu::TensorStorage>>>()?,
-                node.output
+                node.outputs
                     .iter()
                     .map(|output| runner.get_storage(output))
                     .collect::<anyhow::Result<Vec<&gpu::TensorStorage>>>()?,
                 node,
-                &descs,
+                &log_graph,
             )
         })
         .collect::<anyhow::Result<Vec<Op>>>()?;
@@ -299,24 +323,40 @@ pub async fn eval_graph<'a>(
             std::fs::create_dir(folder)?;
         }
 
-        let mut outputs: Vec<(&str, CPUTensor)> = Vec::new();
-        for (inter, desc) in descs.iter() {
+        let mut outputs: Vec<(String, CPUTensor)> = Vec::new();
+        for inter in log_graph.names() {
+            let desc = log_graph.get_desc_name(inter);
             if constants.contains(inter)
-                || graph.initializer.iter().any(|init| &init.name() == inter)
-                || graph.input.iter().any(|input| &input.name() == inter)
+                || graph.initializer.iter().any(|init| init.name() == inter)
+                || graph.input.iter().any(|input| input.name() == inter)
             {
                 continue;
             }
-            let tensor_bytes = runner.read_bytes(inter).await?;
-            outputs.push((inter, CPUTensor::new(desc.clone(), &tensor_bytes)))
+            let tensor_bytes = runner
+                .read_bytes(
+                    &log_graph
+                        .find_buffer_handle(inter)
+                        .ok_or_else(|| anyhow!("could not find buffer for {inter}"))?,
+                )
+                .await?;
+            outputs.push((
+                String::from(inter),
+                CPUTensor::new(desc.clone(), &tensor_bytes),
+            ))
         }
 
         outputs
     } else {
-        let mut outputs: Vec<(&str, CPUTensor)> = Vec::new();
+        let mut outputs: Vec<(String, CPUTensor)> = Vec::new();
         for output in &graph.output {
-            let tensor_bytes = runner.read_bytes(output.name()).await?;
-            let desc = &descs[output.name()];
+            let tensor_bytes = runner
+                .read_bytes(
+                    &log_graph
+                        .find_buffer_handle(output.name())
+                        .ok_or_else(|| anyhow!("could not find buffer for {}", output.name()))?,
+                )
+                .await?;
+            let desc = log_graph.get_desc_name(output.name());
 
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -324,10 +364,14 @@ pub async fn eval_graph<'a>(
                 log::info!("run done ({:?})", elapsed);
             }
 
-            outputs.push((output.name(), CPUTensor::new(desc.clone(), &tensor_bytes)));
+            outputs.push((
+                String::from(output.name()),
+                CPUTensor::new(desc.clone(), &tensor_bytes),
+            ));
         }
         outputs
     };
+
     let outputs = HashMap::from_iter(outputs);
     log::info!("done!");
 

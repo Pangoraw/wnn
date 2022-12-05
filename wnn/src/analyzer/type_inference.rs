@@ -30,7 +30,7 @@ impl<'a> TypeInferer<'a> {
                         "value" => Some(DataType::from_int(attr.t.data_type())),
                         _ => None,
                     })
-                    .unwrap_or_else(|| Ok(DataType::F32))?;
+                    .unwrap_or(Ok(DataType::F32))?;
                 vec![dtype]
             }
             "Constant" => {

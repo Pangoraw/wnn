@@ -4,7 +4,8 @@ use anyhow::{anyhow, bail, Context};
 use wgpu::util::DeviceExt;
 
 use crate::{
-    compiler::{compile_node, effective_inputs, is_reshape_op, is_untracked_op},
+    analyzer::{self, effective_inputs, BufferHandle, LogicalGraph, LogicalOp, LogicalOpType},
+    compiler::{compile_node, is_untracked_op},
     onnx,
     tensor::{DataType, TensorDesc},
     utils::external_data,
@@ -63,38 +64,42 @@ impl Op {
         device: &wgpu::Device,
         inputs: Vec<&TensorStorage>,
         outputs: Vec<&TensorStorage>,
-        node: &onnx::NodeProto,
-        descs: &HashMap<&str, TensorDesc>,
+        logical_op: &LogicalOp,
+        logical_graph: &LogicalGraph,
     ) -> anyhow::Result<Self> {
-        let shader = compile_node(node, descs)
-            .with_context(|| anyhow!("compiling shader for {}", node.name()))?;
-        let enable_f16 = node
-            .input
+        let shader = compile_node(logical_op, logical_graph)
+            .with_context(|| anyhow!("compiling shader for {}", logical_op.name()))?;
+        let enable_f16 = logical_op
+            .inputs
             .iter()
-            .take(effective_inputs(node))
-            .any(|input| matches!(descs[input.as_str()].dtype, DataType::F16))
-            || node
-                .output
+            .take(effective_inputs(logical_op))
+            .any(|input| matches!(logical_graph.get_desc(*input).dtype, DataType::F16))
+            || logical_op
+                .outputs
                 .iter()
-                .any(|output| matches!(descs[output.as_str()].dtype, DataType::F16));
+                .any(|output| matches!(logical_graph.get_desc(*output).dtype, DataType::F16));
         if enable_f16 {
             bail!("f16 is currently not supported in naga");
         }
         let shader_source = shader
             .to_wgsl(enable_f16)
-            .with_context(|| anyhow!("expanding shader for {}", node.name()))?;
+            .with_context(|| anyhow!("expanding shader for {}", logical_op.name()))?;
 
         // println!("{shader_source}");
 
         let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&format!("Shader {}[{}]", node.name(), node.op_type())),
+            label: Some(&format!(
+                "Shader {}[{:?}]",
+                logical_op.name(),
+                logical_op.op_type()
+            )),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(shader_source)),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(&format!(
-                "Compute Pipeline {}[{}]",
-                node.name(),
-                node.op_type()
+                "Compute Pipeline {}[{:?}]",
+                logical_op.name(),
+                logical_op.op_type()
             )),
             layout: None,
             module: &kernel,
@@ -102,9 +107,9 @@ impl Op {
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(&format!(
-                "Bind Group Compute {}[{}]",
-                node.name(),
-                node.op_type()
+                "Bind Group Compute {}[{:?}]",
+                logical_op.name(),
+                logical_op.op_type()
             )),
             entries: &inputs
                 .iter()
@@ -138,22 +143,22 @@ impl Op {
     }
 }
 
-pub(crate) struct Runner<'a> {
+pub(crate) struct Runner {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
 
-    outputs: HashMap<&'a str, wgpu::Buffer>,
+    outputs: HashMap<BufferHandle, wgpu::Buffer>,
     slots: Vec<TensorStorage>,
-    which_slots: HashMap<&'a str, usize>,
+    which_slots: HashMap<BufferHandle, usize>,
 }
 
 const MAX_ALLOC_LIMIT: u64 = 7_500_000_000;
 
-impl<'a> Runner<'a> {
+impl Runner {
     pub(crate) async fn new(
         max_buffer_size: Option<u32>,
         enable_f16: bool,
-    ) -> anyhow::Result<Runner<'a>> {
+    ) -> anyhow::Result<Runner> {
         let instance = wgpu::Instance::new(wgpu::Backends::all());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -210,8 +215,7 @@ impl<'a> Runner<'a> {
     /// TODO: put inits, inputs and output buffers inside the allocation line too?
     pub(crate) fn allocate_tensors(
         &mut self,
-        nodes: &'a [onnx::NodeProto],
-        descs: &HashMap<&str, TensorDesc>,
+        log_graph: &analyzer::LogicalGraph,
         force_readable: bool,
         allow_not_exact_size_buffers: bool,
     ) -> anyhow::Result<()> {
@@ -234,31 +238,37 @@ impl<'a> Runner<'a> {
             self.slots.len(),
         );
 
-        let aliases: HashMap<&str, &str> = HashMap::from_iter(
-            nodes
+        let aliases: HashMap<BufferHandle, BufferHandle> = HashMap::from_iter(
+            log_graph
+                .ops
                 .iter()
-                .filter(|node| is_reshape_op(node.op_type()))
-                .map(|node| (node.output[0].as_str(), node.input[0].as_str())),
+                .filter(|node| matches!(node.op_type(), LogicalOpType::ReshapeOnly))
+                .map(|node| (node.outputs[0], node.inputs[0])),
         );
 
         // Iterate the nodes in reverse to get liveness ranges for free.
         // See https://www.mattkeeter.com/blog/2022-10-04-ssra/ for more details.
         // If `force_readable` == true, then we never free the slots so that each value has its own
         // buffer.
-        'nodes: for node in nodes.iter().rev() {
-            if is_untracked_op(node.op_type()) || is_reshape_op(node.op_type()) {
+        'nodes: for node in log_graph.ops.iter().rev() {
+            if is_untracked_op(node.op_type())
+                || matches!(node.op_type(), LogicalOpType::ReshapeOnly)
+            {
                 continue 'nodes;
             }
 
             // We allocate inputs first, so that no ops can run the risk of having the same buffer
             // as inputs and outputs because output buffers are only freed once input buffers have
             // been allocated for this particular node.
-            'inputs: for input in node.input.iter().take(effective_inputs(node)).map(|input| {
-                match aliases.get(input.as_str()) {
+            'inputs: for input in node
+                .inputs
+                .iter()
+                .take(analyzer::effective_inputs(node))
+                .map(|input| match aliases.get(input) {
                     Some(s) => s,
-                    None => input.as_str(),
-                }
-            }) {
+                    None => input,
+                })
+            {
                 // Input already has a buffer, skip it..
                 if self.which_slots.contains_key(input) {
                     continue 'inputs;
@@ -278,7 +288,7 @@ impl<'a> Runner<'a> {
                             && match self.slots[*slot_index]
                                 .desc
                                 .size_of()
-                                .cmp(&descs[input].size_of())
+                                .cmp(&log_graph.get_desc(*input).size_of())
                             {
                                 std::cmp::Ordering::Greater if allow_not_exact_size_buffers => true,
                                 std::cmp::Ordering::Equal => true,
@@ -290,9 +300,9 @@ impl<'a> Runner<'a> {
 
                     // 1.1) Reserve free slot if available
                     slot.free = false;
-                    self.which_slots.insert(input, slot_index);
+                    self.which_slots.insert(*input, slot_index);
                 } else {
-                    let desc = descs[input].clone();
+                    let desc = log_graph.get_desc(*input);
 
                     current_size += desc.size_of() as u64;
                     if current_size > MAX_ALLOC_LIMIT {
@@ -313,23 +323,19 @@ impl<'a> Runner<'a> {
                     );
 
                     self.slots
-                        .push(TensorStorage::new(&self.device, desc, None, force_readable));
+                        .push(TensorStorage::new(&self.device, desc.clone(), None, force_readable));
                     slots_availability.push(Slot { free: false });
 
                     debug_assert!(self.slots.len() == slots_availability.len());
 
-                    self.which_slots.insert(input, slot_index);
+                    self.which_slots.insert(*input, slot_index);
                 }
             }
 
-            'outputs: for output in
-                node.output
-                    .iter()
-                    .map(|output| match aliases.get(output.as_str()) {
-                        Some(s) => s,
-                        None => output.as_str(),
-                    })
-            {
+            'outputs: for output in node.outputs.iter().map(|output| match aliases.get(output) {
+                Some(s) => s,
+                None => output,
+            }) {
                 if !self.which_slots.contains_key(output) {
                     log::warn!("found output which was not used before {output}");
                     continue 'outputs;
@@ -357,10 +363,10 @@ impl<'a> Runner<'a> {
         }
 
         for (output, input) in aliases {
-            if self.which_slots.contains_key(output) {
+            if self.which_slots.contains_key(&output) {
                 continue;
             }
-            self.which_slots.insert(output, self.which_slots[input]);
+            self.which_slots.insert(output, self.which_slots[&input]);
         }
 
         if &std::env::var_os("DUMP_ALLOCS")
@@ -369,35 +375,31 @@ impl<'a> Runner<'a> {
             == "1"
         {
             println!("=== ALLOCATIONS");
-            for node in nodes {
+            for node in &log_graph.ops {
                 if is_untracked_op(node.op_type()) {
                     continue;
                 }
 
-                for (i, output) in node.output.iter().enumerate() {
+                for (i, output) in node.outputs.iter().enumerate() {
                     print!(
                         "{}(#{})",
                         output,
-                        match self.which_slots.get(output.as_str()) {
+                        match self.which_slots.get(output) {
                             Some(s) => *s as isize,
                             None => -1,
                         }
                     );
-                    if i != node.output.len() - 1 {
+                    if i != node.outputs.len() - 1 {
                         print!(", ");
                     }
                 }
-                print!("\t= {}[{}](", node.name(), node.op_type());
-                let input_len = if node.op_type() == "Resize" {
-                    1
-                } else {
-                    node.input.len()
-                };
-                for (i, input) in node.input.iter().take(input_len).enumerate() {
+                print!("\t= {}[{:?}](", node.name(), node.op_type());
+                let input_len = effective_inputs(node);
+                for (i, input) in node.inputs.iter().take(input_len).enumerate() {
                     print!(
                         "{}(#{})",
                         input,
-                        match self.which_slots.get(input.as_str()) {
+                        match self.which_slots.get(input) {
                             Some(s) => *s as isize,
                             None => -1,
                         }
@@ -414,50 +416,50 @@ impl<'a> Runner<'a> {
         Ok(())
     }
 
-    pub(crate) fn get_storage(&self, name: &str) -> anyhow::Result<&TensorStorage> {
-        match self.which_slots.get(name) {
+    pub(crate) fn get_storage(&self, handle: &BufferHandle) -> anyhow::Result<&TensorStorage> {
+        match self.which_slots.get(handle) {
             Some(i) if *i < self.slots.len() => Ok(&self.slots[*i]),
-            _ => Err(anyhow!("failed to find tensor for {name}")),
+            _ => Err(anyhow!("failed to find tensor for %{handle}")),
         }
     }
 
     pub(crate) fn add_node(
         &mut self,
-        name: &'a str,
+        handle: &BufferHandle,
         desc: TensorDesc,
         is_output: bool,
     ) -> anyhow::Result<()> {
         let buf_size = desc.size_of();
-        let storage = TensorStorage::new(&self.device, desc, Some(name), is_output);
-        if self.which_slots.contains_key(name) {
-            anyhow::bail!("node {} was already inserted in runner", name);
+        let storage = TensorStorage::new(&self.device, desc, None, is_output);
+        if self.which_slots.contains_key(handle) {
+            anyhow::bail!("node {} was already inserted in runner", handle);
         }
 
         if is_output {
             let read_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Read buffer {name}")),
+                label: Some(&format!("Read buffer {handle}")),
                 mapped_at_creation: false,
                 size: buf_size as _,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             });
-            self.outputs.insert(name, read_buffer);
+            self.outputs.insert(*handle, read_buffer);
         }
 
         let tensor_idx = self.slots.len();
         self.slots.push(storage);
-        self.which_slots.insert(name, tensor_idx);
+        self.which_slots.insert(*handle, tensor_idx);
         Ok(())
     }
 
     pub(crate) fn add_init(
         &mut self,
-        tensor: &'a onnx::TensorProto,
+        tensor: &onnx::TensorProto,
+        handle: &BufferHandle,
         desc: TensorDesc,
     ) -> anyhow::Result<()> {
         // TODO: Move this function out of gpu::Runner.
         if tensor.data_location() == crate::onnx::tensor_proto::DataLocation::EXTERNAL {
-            return self.add_node_with_init(tensor.name(), desc, &external_data(tensor)?);
-        }
+            return self.add_node_with_init(handle, desc, &external_data(tensor)?); }
 
         let raw_data = match desc.dtype {
             DataType::F32 if !tensor.float_data.is_empty() => {
@@ -471,12 +473,12 @@ impl<'a> Runner<'a> {
             }
             _ => tensor.raw_data(),
         };
-        return self.add_node_with_init(tensor.name(), desc, raw_data);
+        self.add_node_with_init(handle, desc, raw_data)
     }
 
     pub(crate) fn add_node_with_init(
         &mut self,
-        name: &'a str,
+        name: &BufferHandle,
         desc: TensorDesc,
         raw_data: &[u8],
     ) -> anyhow::Result<()> {
@@ -495,15 +497,15 @@ impl<'a> Runner<'a> {
             return Ok(());
             // bail!("tensor {} was already inserted in runner", name);
         }
-        let storage = TensorStorage::new_with_init(&self.device, raw_data, desc, Some(name));
+        let storage = TensorStorage::new_with_init(&self.device, raw_data, desc, None);
         let tensor_idx = self.which_slots.len();
-        self.which_slots.insert(name, tensor_idx);
+        self.which_slots.insert(*name, tensor_idx);
         self.slots.push(storage);
         Ok(())
     }
 
-    pub(crate) async fn read_bytes(&self, name: &str) -> anyhow::Result<Vec<u8>> {
-        let read_buf = &self.outputs[name];
+    pub(crate) async fn read_bytes(&self, handle: &BufferHandle) -> anyhow::Result<Vec<u8>> {
+        let read_buf = &self.outputs[handle];
 
         let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
         let slice = read_buf.slice(..);

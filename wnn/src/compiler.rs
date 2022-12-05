@@ -5,12 +5,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail};
 use lazy_static::lazy_static;
 
-use crate::{
-    analyzer::TensorDescs,
-    onnx::{self, NodeProto},
-    tensor::DataType,
-    utils::{get_attr_float, get_attr_floats, get_attr_int, get_attr_ints, get_attr_string},
-};
+use crate::analyzer::{BufferHandle, LogicalGraph, LogicalOp, LogicalOpType, PoolType};
 
 lazy_static! {
     static ref SHADER_FILES: HashMap<&'static str, &'static str> = HashMap::from_iter([
@@ -82,73 +77,53 @@ fn ints_to_strides(sizes: &mut [i64]) {
     });
 }
 
-fn compute_strides(descs: &TensorDescs, names: &[String]) -> anyhow::Result<Vec<Vec<i64>>> {
+fn compute_strides(descs: &LogicalGraph, names: &[BufferHandle]) -> anyhow::Result<Vec<Vec<i64>>> {
     names
         .iter()
-        .filter_map(|node| {
-            if node.is_empty() {
-                None
-            } else {
-                Some(descs[node.as_str()].shape.as_ints().map(|mut sizes| {
-                    ints_to_strides(&mut sizes);
-                    sizes
-                }))
-            }
+        .map(|node| {
+            descs.get_desc(*node).shape.as_ints().map(|mut sizes| {
+                ints_to_strides(&mut sizes);
+                sizes
+            })
         })
         .collect::<anyhow::Result<Vec<Vec<i64>>>>()
 }
 
-fn base_context(node: &onnx::NodeProto, descs: &TensorDescs) -> anyhow::Result<tera::Context> {
+fn base_context(op: &LogicalOp, descs: &LogicalGraph) -> anyhow::Result<tera::Context> {
     let mut context = tera::Context::new();
     context.insert("scalar", "f32");
-    context.insert("i_length", &node.input.len());
-    context.insert("o_length", &node.output.len());
+    context.insert("i_length", &op.inputs.len());
+    context.insert("o_length", &op.outputs.len());
     context.insert(
         "i_lens",
-        &node
-            .input
+        &op.inputs
             .iter()
-            .filter_map(|input| {
-                if input.is_empty() {
-                    None
-                } else {
-                    Some(descs[input.as_str()].shape.numel().unwrap())
-                }
-            })
+            .map(|input| descs.get_desc(*input).shape.numel().unwrap())
             .collect::<Vec<usize>>(),
     );
     context.insert(
         "o_lens",
-        &node
-            .output
+        &op.outputs
             .iter()
-            .map(|output| descs[output.as_str()].shape.numel().unwrap())
+            .map(|output| descs.get_desc(*output).shape.numel().unwrap())
             .collect::<Vec<usize>>(),
     );
     context.insert(
         "i_sizes",
-        &node
-            .input
+        &op.inputs
             .iter()
-            .filter_map(|input| {
-                if input.is_empty() {
-                    None
-                } else {
-                    Some(descs[input.as_str()].shape.as_ints())
-                }
-            })
+            .map(|input| descs.get_desc(*input).shape.as_ints())
             .collect::<anyhow::Result<Vec<Vec<i64>>>>()?,
     );
-    context.insert("i_strides", &compute_strides(descs, &node.input)?);
+    context.insert("i_strides", &compute_strides(descs, &op.inputs)?);
     context.insert(
         "o_sizes",
-        &node
-            .output
+        &op.outputs
             .iter()
-            .map(|input| descs[input.as_str()].shape.as_ints())
+            .map(|input| descs.get_desc(*input).shape.as_ints())
             .collect::<anyhow::Result<Vec<Vec<i64>>>>()?,
     );
-    context.insert("o_strides", &compute_strides(descs, &node.output)?);
+    context.insert("o_strides", &compute_strides(descs, &op.outputs)?);
     Ok(context)
 }
 
@@ -187,23 +162,28 @@ fn add_invocs_to_context(context: &mut tera::Context, n_invocs: u64) -> u64 {
 /// Generates the relevant `ShaderInvocation` for a given node using its input descriptions and
 /// attributes, the corresponding wgsl code can then be retrieved using `ShaderInvocation::to_wgsl()`.
 pub(crate) fn compile_node(
-    node: &onnx::NodeProto,
-    descs: &TensorDescs,
+    logical_op: &LogicalOp,
+    logical_graph: &LogicalGraph,
 ) -> anyhow::Result<ShaderInvocation> {
-    let mut context = base_context(node, descs)?;
-    let invoc = match node.op_type() {
-        "MatMul" | "Gemm" => {
-            let trans_a = get_attr_int(node, "transA").unwrap_or(0);
-            let trans_b = get_attr_int(node, "transB").unwrap_or(0);
+    let mut context = base_context(logical_op, logical_graph)?;
+    let invoc = match logical_op.op_type() {
+        LogicalOpType::Gemm {
+            trans_a,
+            trans_b,
+            alpha,
+            beta,
+        } => {
             context.insert("trans_a", &trans_a);
             context.insert("trans_b", &trans_b);
 
-            let alpha = get_attr_float(node, "alpha").unwrap_or(1.);
-            let beta = get_attr_float(node, "beta").unwrap_or(1.);
             context.insert("alpha", &alpha);
             context.insert("beta", &beta);
 
-            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let n_invocs = logical_graph
+                .get_desc(logical_op.outputs[0])
+                .shape
+                .numel()
+                .unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             ShaderInvocation {
@@ -212,11 +192,14 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "BatchNormalization" => {
-            let epsilon = get_attr_float(node, "epsilon").unwrap_or(1e-4);
+        LogicalOpType::BatchNormalization { epsilon } => {
             context.insert("epsilon", &epsilon);
 
-            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let n_invocs = logical_graph
+                .get_desc(logical_op.outputs[0])
+                .shape
+                .numel()
+                .unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             ShaderInvocation {
@@ -225,9 +208,8 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "InstanceNormalization" => {
-            let input_shape = &descs[node.input[0].as_str()].shape;
-            let epsilon = get_attr_float(node, "epsilon").unwrap_or(1e-4);
+        LogicalOpType::InstanceNormalization { epsilon } => {
+            let input_shape = &logical_graph.get_desc(logical_op.inputs[0]).shape;
             context.insert("epsilon", &epsilon);
 
             ShaderInvocation {
@@ -240,22 +222,23 @@ pub(crate) fn compile_node(
                 ),
             }
         }
-        "Resize" => {
-            if !matches!(get_attr_string(node, "mode"), Some("nearest")) {
+        LogicalOpType::Resize {
+            transformation_mode,
+        } => {
+            /*
+            if !matches!(get_attr_string(logical_op, "mode"), Some("nearest")) {
                 anyhow::bail!(
                     "unsupported resizing mode {:?}",
-                    get_attr_string(node, "mode")
+                    get_attr_string(logical_op, "mode")
                 );
+            }*/
+
+            match transformation_mode {
+                crate::analyzer::ResizeCoordinateTransformationMode::Asymmetric => {} // other => bail!("unsupported coordinate_transformation_mode '{:?}'", other),
             }
 
-            match get_attr_string(node, "coordinate_transformation_mode") {
-                Some("asymmetric") => {}
-                Some(other) => bail!("unsupported coordinate_transformation_mode '{}'", other),
-                None => bail!("unsupported coordinate_transformation_mode 'half_pixel'"),
-            }
-
-            let input_shape = &descs[node.input[0].as_str()].shape;
-            let output_shape = &descs[node.output[0].as_str()].shape;
+            let input_shape = &logical_graph.get_desc(logical_op.inputs[0]).shape;
+            let output_shape = &logical_graph.get_desc(logical_op.outputs[0]).shape;
             let n_invocs = output_shape.numel().unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
@@ -271,15 +254,13 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "Softmax" => {
-            let axis = get_attr_int(node, "axis").unwrap_or(-1);
-
-            let out_shape = &descs[node.output[0].as_str()].shape;
-            let real_axis = out_shape.reldim(axis as isize);
+        LogicalOpType::Softmax { axis } => {
+            let out_shape = &logical_graph.get_desc(logical_op.outputs[0]).shape;
+            let real_axis = out_shape.reldim(*axis as isize);
             context.insert("axis", &real_axis);
 
             let num_reduce =
-                (out_shape.numel().unwrap() / out_shape.concrete_size(axis as _)?) as u64;
+                (out_shape.numel().unwrap() / out_shape.concrete_size(*axis as _)?) as u64;
 
             let dispatch_x = ceil(num_reduce, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
             context.insert(
@@ -293,15 +274,24 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "Slice" => {
-            let out_shape = &descs[node.output[0].as_str()].shape;
-            context.insert("axes", &[3]);
-            context.insert("starts", &[0]);
-            context.insert("steps", &[1]);
+        LogicalOpType::Slice {
+            axes,
+            starts,
+            ends,
+            steps,
+        } => {
+            let out_shape = &logical_graph.get_desc(logical_op.outputs[0]).shape;
+            context.insert("axes", axes);
+            context.insert("starts", starts);
+            context.insert("ends", ends);
+            context.insert("steps", steps);
 
-            let n_invocs = out_shape
-                .numel()
-                .ok_or_else(|| anyhow!("could not get concrete shape for {}", node.output[0]))?;
+            let n_invocs = out_shape.numel().ok_or_else(|| {
+                anyhow!(
+                    "could not get concrete shape for %{}",
+                    logical_op.outputs[0]
+                )
+            })?;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs as _);
 
             ShaderInvocation {
@@ -310,35 +300,18 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "ConstantOfShape" => {
-            let out_desc = &descs[node.output[0].as_str()];
+        LogicalOpType::ConstantOfShape { constant } => {
+            let out_desc = &logical_graph.get_desc(logical_op.outputs[0]);
             let out_shape = &out_desc.shape;
-            let n_invocs = out_shape
-                .numel()
-                .ok_or_else(|| anyhow!("could not get concrete shape for {}", node.output[0]))?;
+            let n_invocs = out_shape.numel().ok_or_else(|| {
+                anyhow!(
+                    "could not get concrete shape for %{}",
+                    logical_op.outputs[0]
+                )
+            })?;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs as u64);
 
-            let (value, scalar) = match &out_desc.dtype {
-                DataType::F32 => (
-                    format!(
-                        "{}",
-                        get_attr_floats(node, "value")
-                            .and_then(|floats| floats.first())
-                            .unwrap_or(&0.)
-                    ),
-                    "f32",
-                ),
-                DataType::I64 => (
-                    format!(
-                        "{}",
-                        get_attr_ints(node, "value")
-                            .and_then(|ints| ints.first())
-                            .unwrap_or(&0),
-                    ),
-                    "i32",
-                ),
-                other => bail!("invalid data type for ConstantOfShape {other}"),
-            };
+            let (value, scalar) = (format!("{}", constant), "f32");
             context.insert("value", &value);
             context.insert("scalar", scalar);
 
@@ -348,23 +321,25 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "Concat" => {
-            let out_shape = &descs[node.output[0].as_str()].shape;
-            let n_invocs = out_shape
-                .numel()
-                .ok_or_else(|| anyhow!("could not get concrete shape for {}", node.output[0]))?;
+        LogicalOpType::Concat { axis } => {
+            let out_shape = &logical_graph.get_desc(logical_op.outputs[0]).shape;
+            let n_invocs = out_shape.numel().ok_or_else(|| {
+                anyhow!(
+                    "could not get concrete shape for %{}",
+                    logical_op.outputs[0]
+                )
+            })?;
 
-            if node.input.len() != 2 {
+            if logical_op.inputs.len() != 2 {
                 bail!(
                     "unsupported number of input {} for Concat",
-                    node.input.len()
+                    logical_op.inputs.len()
                 );
             }
 
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs as u64);
 
-            let axis = get_attr_int(node, "axis").ok_or_else(|| anyhow!("could not get axis"))?;
-            let axis = out_shape.reldim(axis as isize);
+            let axis = out_shape.reldim(*axis as isize);
             context.insert("axis", &axis);
 
             ShaderInvocation {
@@ -373,15 +348,13 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "Cast" => {
-            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+        LogicalOpType::Cast { target_type } => {
+            let n_invocs = logical_graph
+                .get_desc(logical_op.outputs[0])
+                .shape
+                .numel()
+                .unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
-
-            let target_type = DataType::from_int(
-                get_attr_int(node, "to")
-                    .ok_or_else(|| anyhow!("could not find attribute 'to' in Cast"))?
-                    as i32,
-            )?;
 
             let target_type = target_type.to_str();
             context.insert("scalar_output", target_type);
@@ -393,25 +366,35 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        act @ ("Cos" | "Sin" | "Relu" | "LeakyRelu" | "Sigmoid") => {
-            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+        act @ (LogicalOpType::Cos
+        | LogicalOpType::Sin
+        | LogicalOpType::Relu
+        | LogicalOpType::LeakyRelu { .. }
+        | LogicalOpType::Sigmoid) => {
+            let n_invocs = logical_graph
+                .get_desc(logical_op.outputs[0])
+                .shape
+                .numel()
+                .unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
-            if act == "LeakyRelu" {
-                let alpha = get_attr_float(node, "alpha").unwrap_or(0.01);
-                context.insert("activation", &format!("{alpha} * x"))
-            } else {
-                context.insert(
-                    "activation",
-                    match act {
-                        // f(x) =
-                        "Relu" => "max(x, 0.)",
-                        "Sigmoid" => "1. / (1. + exp(-x))",
-                        "Cos" => "cos(x)",
-                        "Sin" => "sin(x)",
-                        _ => unreachable!(),
-                    },
-                );
+            match act {
+                LogicalOpType::LeakyRelu { alpha } => {
+                    context.insert("activation", &format!("{alpha} * x"))
+                }
+                _ => {
+                    context.insert(
+                        "activation",
+                        match act {
+                            // f(x) =
+                            LogicalOpType::Relu => "max(x, 0.)",
+                            LogicalOpType::Sigmoid => "1. / (1. + exp(-x))",
+                            LogicalOpType::Cos => "cos(x)",
+                            LogicalOpType::Sin => "sin(x)",
+                            _ => unreachable!(),
+                        },
+                    );
+                }
             }
 
             ShaderInvocation {
@@ -420,47 +403,14 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "Conv" => {
-            match get_attr_int(node, "group").unwrap_or(1) {
-                1 => {}
-                other => bail!("unsupported group = {other}"),
-            }
-            if get_attr_ints(node, "dilations")
-                .unwrap_or(&[1, 1])
-                .iter()
-                .any(|dil| *dil != 1)
-            {
-                bail!("invalid dilations {:?}", get_attr_ints(node, "dilations"));
-            }
+        LogicalOpType::Transpose { perm } => {
+            let input_a = &logical_graph.get_desc(logical_op.inputs[0]);
 
-            let weight_shape = &descs[node.input[1].as_str()].shape;
-            let k_strides = get_attr_ints(node, "strides").unwrap_or(&[1, 1]);
-            context.insert("k_strides", k_strides);
-
-            let pads = get_attr_ints(node, "pads").unwrap_or(&[0, 0, 0, 0]);
-            context.insert("pads", pads);
-
-            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
-            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
-
-            let kernel_shape = [
-                weight_shape.concrete_size(-2)? as i64,
-                weight_shape.concrete_size(-1)? as i64,
-            ];
-            let kernel_shape = get_attr_ints(node, "kernel_shape").unwrap_or(&kernel_shape);
-            context.insert("kernel_shape", kernel_shape);
-
-            ShaderInvocation {
-                file_name: "conv",
-                context,
-                dispatch: (dispatch_x as _, 1, 1),
-            }
-        }
-        "Transpose" => {
-            let input_a = &descs[node.input[0].as_str()];
-            let perm = get_attr_ints(node, "perm").ok_or_else(|| anyhow!("could not find perm"))?;
-
-            let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let out_shape = logical_graph
+                .get_desc(logical_op.outputs[0])
+                .shape
+                .numel()
+                .unwrap() as u64;
             let dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
             context.insert(
                 "workgroup_x",
@@ -483,9 +433,13 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "Where" => {
+        LogicalOpType::Where => {
             // Where(cond, a, b)
-            let n_invocs = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let n_invocs = logical_graph
+                .get_desc(logical_op.outputs[0])
+                .shape
+                .numel()
+                .unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             ShaderInvocation {
@@ -494,15 +448,19 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        op @ ("Equal" | "Mul" | "Add" | "Div" | "Sub") => {
+        op @ (LogicalOpType::Equal
+        | LogicalOpType::Mul
+        | LogicalOpType::Add
+        | LogicalOpType::Div
+        | LogicalOpType::Sub) => {
             // TODO: make case with scalar inlining?
 
-            let mut input_a = descs[node.input[0].as_str()].shape.clone();
-            let mut input_b = descs[node.input[1].as_str()].shape.clone();
+            let mut input_a = logical_graph.get_desc(logical_op.inputs[0]).shape.clone();
+            let mut input_b = logical_graph.get_desc(logical_op.inputs[1]).shape.clone();
             input_a.pad_left_to(input_b.ndims());
             input_b.pad_left_to(input_a.ndims());
 
-            let out_shape = &descs[node.output[0].as_str()].shape;
+            let out_shape = &logical_graph.get_desc(logical_op.outputs[0]).shape;
 
             let n_invocs = out_shape.numel().unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
@@ -540,16 +498,16 @@ pub(crate) fn compile_node(
             context.insert(
                 "op",
                 match op {
-                    "Add" => "+",
-                    "Mul" => "*",
-                    "Div" => "/",
-                    "Sub" => "-",
-                    "Equal" => "==",
+                    LogicalOpType::Add => "+",
+                    LogicalOpType::Mul => "*",
+                    LogicalOpType::Div => "/",
+                    LogicalOpType::Sub => "-",
+                    LogicalOpType::Equal => "==",
                     _ => unreachable!(),
                 },
             );
 
-            if op == "Equal" {
+            if matches!(op, LogicalOpType::Equal) {
                 log::warn!("compiling Equal: probably not supported (bool is not numeric)");
                 context.insert("cast", &true);
             }
@@ -560,8 +518,12 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "GlobalAveragePool" => {
-            let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+        LogicalOpType::GlobalAveragePool => {
+            let out_shape = logical_graph
+                .get_desc(logical_op.outputs[0])
+                .shape
+                .numel()
+                .unwrap() as u64;
             let dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
             context.insert(
                 "workgroup_x",
@@ -574,18 +536,23 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        "MaxPool" => {
-            let kernel_shape = get_attr_ints(node, "kernel_shape")
-                .ok_or_else(|| anyhow!("could not find pads for MaxPool"))?;
+        LogicalOpType::Pool {
+            ptype: PoolType::Conv,
+            group: _,
+            dilations: _,
+            k_strides,
+            pads,
+            kernel_shape,
+        } => {
             context.insert("kernel_shape", kernel_shape);
-
-            let pads = get_attr_ints(node, "pads").unwrap_or(&[1, 1, 1, 1]);
             context.insert("pads", pads);
+            context.insert("k_strides", k_strides);
 
-            let strides = get_attr_ints(node, "strides").unwrap_or(&[1, 1]);
-            context.insert("k_strides", strides);
-
-            let out_shape = descs[node.output[0].as_str()].shape.numel().unwrap() as u64;
+            let out_shape = logical_graph
+                .get_desc(logical_op.outputs[0])
+                .shape
+                .numel()
+                .unwrap() as u64;
             let dispatch_x = ceil(out_shape, MAX_COMPUTE_INVOCATIONS_PER_WORKGROUP);
 
             context.insert(
@@ -599,36 +566,17 @@ pub(crate) fn compile_node(
                 dispatch: (dispatch_x as _, 1, 1),
             }
         }
-        op => bail!("unimplemented {op}"),
+        op => bail!("unimplemented {:?}", op),
     };
 
     Ok(invoc)
 }
 
-/// For some ops, the static analysis is used to get the parameters and therefore not all inputs
-/// are needed. That's why we only use a subset of the inputs in this case.
-pub(crate) fn effective_inputs(node: &NodeProto) -> usize {
-    match node.op_type() {
-        "ConstantOfShape" => 0,
-        "Resize" | "Slice" => 1, // These ops are tracked statically so we remove tensor "params"
-        _ => node.input.len(),
-    }
-}
-
 /// These ops get a special handling and should not result in a ShaderInvocation
 /// Basically, we only currently support Shape in static analysis and Constant are
 /// added as initializer before any allocation happens.
-pub(crate) fn is_untracked_op(op_type: &str) -> bool {
-    matches!(op_type, "Shape" | "Constant")
-}
-
-/// We apply a special treatment to these ops since there is no data change
-/// to the underlying buffer.
-pub(crate) fn is_reshape_op(op_type: &str) -> bool {
-    matches!(
-        op_type,
-        "Reshape" | "Identity" | "Flatten" | "Squeeze" | "Unsqueeze"
-    )
+pub(crate) fn is_untracked_op(op_type: &LogicalOpType) -> bool {
+    matches!(op_type, LogicalOpType::Shape | LogicalOpType::Constant)
 }
 
 fn ceil(x: u64, factor: u64) -> u64 {

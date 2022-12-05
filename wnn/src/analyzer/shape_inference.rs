@@ -2,9 +2,11 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail};
 
-use crate::onnx;
 use crate::shape::Shape;
 use crate::utils::*;
+use crate::{onnx, tensor::DataType};
+
+use super::{LogicalOpType, PoolType};
 
 pub(super) struct ShapeInferer<'a> {
     shapes: HashMap<&'a str, Shape>,
@@ -25,10 +27,13 @@ impl<'a> ShapeInferer<'a> {
         }
     }
 
-    pub(super) fn infer_node(&mut self, node: &'a onnx::NodeProto) -> anyhow::Result<Vec<Shape>> {
+    pub(super) fn infer_node(
+        &mut self,
+        node: &'a onnx::NodeProto,
+    ) -> anyhow::Result<(super::LogicalOpType, Vec<Shape>)> {
         let out = match node.op_type() {
             op @ ("Gemm" | "MatMul") => {
-                let transpose_a = if op == "Gemm" {
+                let trans_a = if op == "Gemm" {
                     node.attribute
                         .iter()
                         .find_map(|attr| {
@@ -39,10 +44,11 @@ impl<'a> ShapeInferer<'a> {
                             }
                         })
                         .unwrap_or(0)
+                        == 1
                 } else {
-                    0
+                    false
                 };
-                let transpose_b = if op == "Gemm" {
+                let trans_b = if op == "Gemm" {
                     node.attribute
                         .iter()
                         .find_map(|attr| {
@@ -53,8 +59,9 @@ impl<'a> ShapeInferer<'a> {
                             }
                         })
                         .unwrap_or(0)
+                        == 1
                 } else {
-                    0
+                    false
                 };
 
                 let input_shapes = node
@@ -76,10 +83,13 @@ impl<'a> ShapeInferer<'a> {
                 let mut b = input_shapes[1].clone();
                 let c = input_shapes.get(2);
 
-                if transpose_a == 1 {
+                let alpha = get_attr_float(node, "alpha").unwrap_or(1.);
+                let beta = get_attr_float(node, "beta").unwrap_or(1.);
+
+                if trans_a {
                     a.transpose(-1, -2)
                 };
-                if transpose_b == 1 {
+                if trans_b {
                     b.transpose(-1, -2)
                 };
 
@@ -99,7 +109,15 @@ impl<'a> ShapeInferer<'a> {
                 } else {
                     bail!("invalid {} a{} @ b{}", op, a, b);
                 }
-                vec![out_dim]
+                (
+                    LogicalOpType::Gemm {
+                        trans_a,
+                        trans_b,
+                        alpha,
+                        beta,
+                    },
+                    vec![out_dim],
+                )
             }
             op @ ("Mul" | "Pow" | "Add" | "Div" | "Sub") => {
                 let input_shapes = node
@@ -149,7 +167,17 @@ impl<'a> ShapeInferer<'a> {
                     b
                 };
 
-                vec![out_shape]
+                (
+                    match op {
+                        "Mul" => LogicalOpType::Mul,
+                        "Add" => LogicalOpType::Add,
+                        "Sub" => LogicalOpType::Sub,
+                        "Div" => LogicalOpType::Div,
+                        "Pow" => LogicalOpType::Pow,
+                        _ => unreachable!(),
+                    },
+                    vec![out_shape],
+                )
             }
             "Expand" => {
                 let mut out = self.shapes[node.input[0].as_str()].clone();
@@ -158,7 +186,7 @@ impl<'a> ShapeInferer<'a> {
                     .ok_or_else(|| anyhow!("failed to find shape {}", node.input[1]))?;
 
                 out.broadcast(&shape)?;
-                vec![out]
+                (LogicalOpType::Expand, vec![out])
             }
             "Transpose" => {
                 let perm = get_attr_ints(node, "perm")
@@ -167,14 +195,22 @@ impl<'a> ShapeInferer<'a> {
                 let mut shape = self.shapes[node.input[0].as_str()].clone();
                 shape.permute(perm);
 
-                vec![shape]
+                (
+                    LogicalOpType::Transpose {
+                        perm: perm.to_vec(),
+                    },
+                    vec![shape],
+                )
             }
             "Flatten" => {
                 let input_shape = &self.shapes[node.input[0].as_str()];
                 let mut output_shape = Shape::empty();
                 output_shape.append_dim(input_shape.size(0).clone());
                 output_shape.append_dim(crate::shape::Dimension::Rest);
-                vec![output_shape.map_and_rest(input_shape)]
+                (
+                    LogicalOpType::ReshapeOnly,
+                    vec![output_shape.map_and_rest(input_shape)],
+                )
             }
             "Concat" => {
                 let input_shapes = node
@@ -218,7 +254,7 @@ impl<'a> ShapeInferer<'a> {
                     ),
                 );
 
-                vec![out_shape]
+                (LogicalOpType::Concat { axis }, vec![out_shape])
             }
             "Squeeze" => {
                 let mut input_shape = self.shapes[node.input[0].as_str()].clone();
@@ -227,7 +263,7 @@ impl<'a> ShapeInferer<'a> {
                     other => bail!("unsupported dynamic Squeeze with input {other}"),
                 }
                 input_shape.squeeze();
-                vec![input_shape]
+                (LogicalOpType::ReshapeOnly, vec![input_shape])
             }
             "Unsqueeze" => {
                 let mut out_shape = self.shapes[node.input[0].as_str()].clone();
@@ -243,7 +279,7 @@ impl<'a> ShapeInferer<'a> {
                     out_shape.unsqueeze(axes.as_int(dim)? as usize);
                 }
 
-                vec![out_shape]
+                (LogicalOpType::ReshapeOnly, vec![out_shape])
             }
             "Gather" => {
                 let axis = get_attr_int(node, "axis").unwrap_or(0);
@@ -282,7 +318,7 @@ impl<'a> ShapeInferer<'a> {
                 } else {
                     unimplemented!();
                 };
-                vec![out_shape]
+                (LogicalOpType::Gather { axis }, vec![out_shape])
             }
             op @ ("Conv" | "MaxPool") => {
                 let input_shapes = node
@@ -332,12 +368,12 @@ impl<'a> ShapeInferer<'a> {
                 };
 
                 let dilations = get_attr_ints(node, "dilations").unwrap_or(&[1, 1]);
-                let out_channels = match op {
+                let (out_channels, pool_type) = match op {
                     "Conv" => {
                         let w = input_shapes[1];
-                        w.size(0).clone()
+                        (w.size(0).clone(), PoolType::Conv)
                     }
-                    "MaxPool" => x.size(1).clone(),
+                    "MaxPool" => (x.size(1).clone(), PoolType::Max),
                     _ => unreachable!(),
                 };
 
@@ -362,7 +398,17 @@ impl<'a> ShapeInferer<'a> {
                 out_shape.append_dim(crate::shape::Dimension::Concrete(h_out as usize)); // H
                 out_shape.append_dim(crate::shape::Dimension::Concrete(w_out as usize)); // W
 
-                vec![out_shape]
+                (
+                    LogicalOpType::Pool {
+                        ptype: pool_type,
+                        group: get_attr_int(node, "group").unwrap_or(1),
+                        dilations: [dilations[0], dilations[1]],
+                        k_strides: [strides[0], strides[1]],
+                        pads: [pads[0], pads[1], pads[2], pads[3]],
+                        kernel_shape: [kernel_shape[0], kernel_shape[1]],
+                    },
+                    vec![out_shape],
+                )
             }
             "Resize" => {
                 let scales = {
@@ -380,7 +426,25 @@ impl<'a> ShapeInferer<'a> {
                 let mut input_shape = self.shapes[node.input[0].as_str()].clone();
                 input_shape.scale(scales)?;
 
-                vec![input_shape]
+                (
+                    LogicalOpType::Resize {
+                        transformation_mode: match get_attr_string(
+                            node,
+                            "coordinate_transformation_mode",
+                        ) {
+                            Some("asymmetric") => {
+                                super::ResizeCoordinateTransformationMode::Asymmetric
+                            }
+                            Some(other) => {
+                                bail!("unsupported coordinate_transformation_mode '{}'", other)
+                            }
+                            None => {
+                                bail!("unsupported coordinate_transformation_mode 'half_pixel'")
+                            }
+                        },
+                    },
+                    vec![input_shape],
+                )
             }
             "Reshape" => {
                 let shape = self
@@ -393,7 +457,7 @@ impl<'a> ShapeInferer<'a> {
                     bail!("invalid Reshape {} => {}", input_shape, out_shape);
                 }
 
-                vec![out_shape]
+                (LogicalOpType::ReshapeOnly, vec![out_shape])
             }
             "ConstantOfShape" => {
                 let output_shape =
@@ -418,7 +482,18 @@ impl<'a> ShapeInferer<'a> {
                     }
                 }
 
-                vec![output_shape]
+                let constant = match node.attribute.iter().find(|attr| attr.name() == "value") {
+                    Some(attr) if attr.t.data_type() == 1 => {
+                        let data = float_slice_from_tensor(&attr.t);
+                        data[0]
+                    }
+                    _ => 0.,
+                };
+
+                (
+                    LogicalOpType::ConstantOfShape { constant },
+                    vec![output_shape],
+                )
             }
             "Constant" => {
                 let mut shape = None;
@@ -448,7 +523,10 @@ impl<'a> ShapeInferer<'a> {
                     }
                 }
 
-                vec![shape.ok_or_else(|| anyhow!("could not infer shape of constant"))?]
+                (
+                    LogicalOpType::Constant,
+                    vec![shape.ok_or_else(|| anyhow!("could not infer shape of constant"))?],
+                )
             }
             "Shape" => {
                 assert!(node.input.len() == 1);
@@ -462,7 +540,10 @@ impl<'a> ShapeInferer<'a> {
                         .insert(node.output[0].as_str(), input_shape.as_ints()?);
                 }
 
-                vec![Shape::from(&[input_shape.ndims() as _])]
+                (
+                    LogicalOpType::Shape,
+                    vec![Shape::from(&[input_shape.ndims() as _])],
+                )
             }
             "GlobalAveragePool" => {
                 let input_shape = &self.shapes[node.input[0].as_str()];
@@ -472,22 +553,71 @@ impl<'a> ShapeInferer<'a> {
                     1,
                     1,
                 ]);
-                vec![output_shape]
+                (LogicalOpType::GlobalAveragePool, vec![output_shape])
             }
-            "BatchNormalization"
-            | "InstanceNormalization"
-            | "Cast"
-            | "LeakyRelu"
-            | "Relu"
-            | "Erf"
-            | "Sqrt"
-            | "Sigmoid"
-            | "Softmax"
-            | "Tanh"
-            | "Sin"
-            | "Cos" => {
-                vec![self.shapes[node.input[0].as_str()].clone()]
+            "BatchNormalization" => (
+                LogicalOpType::BatchNormalization {
+                    epsilon: get_attr_float(node, "epsilon").unwrap_or(1e-4),
+                },
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "InstanceNormalization" => (
+                LogicalOpType::InstanceNormalization {
+                    epsilon: get_attr_float(node, "epsilon").unwrap_or(1e-4),
+                },
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Cast" => {
+                let target_type = DataType::from_int(
+                    get_attr_int(node, "to")
+                        .ok_or_else(|| anyhow!("could not find attribute 'to'"))?
+                        as i32,
+                )?;
+                (
+                    LogicalOpType::Cast { target_type },
+                    vec![self.shapes[node.input[0].as_str()].clone()],
+                )
             }
+            "LeakyRelu" => (
+                LogicalOpType::LeakyRelu {
+                    alpha: get_attr_float(node, "alpha").unwrap_or(0.01),
+                },
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Relu" => (
+                LogicalOpType::Relu,
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Erf" => (
+                LogicalOpType::Erf,
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Sqrt" => (
+                LogicalOpType::Sqrt,
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Sigmoid" => (
+                LogicalOpType::Sigmoid,
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Softmax" => (
+                LogicalOpType::Softmax {
+                    axis: get_attr_int(node, "axis").unwrap_or(-1),
+                },
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Tanh" => (
+                LogicalOpType::Tanh,
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Sin" => (
+                LogicalOpType::Sin,
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Cos" => (
+                LogicalOpType::Cos,
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
             "Slice" => {
                 let x = &self.shapes[node.input[0].as_str()];
                 let r = x.ndims() as i64;
@@ -512,7 +642,7 @@ impl<'a> ShapeInferer<'a> {
                     .input
                     .get(4)
                     .and_then(|input| self.find_constant(input.as_str()))
-                    .unwrap_or_else(|| &default_steps);
+                    .unwrap_or(&default_steps);
                 let mut out = Shape::empty();
 
                 for dim in 0isize..x.ndims() as isize {
@@ -528,7 +658,6 @@ impl<'a> ShapeInferer<'a> {
                         let step = steps[i];
 
                         match (axes[i], start, end, step) {
-                            _ => {}
                             (3, 0, 3, 1) => {}
                             _ => bail!("unsupported slice, currently only supported is [:,:,:,:3]"),
                         }
@@ -541,7 +670,15 @@ impl<'a> ShapeInferer<'a> {
                     }
                 }
 
-                vec![out]
+                (
+                    LogicalOpType::Slice {
+                        axes,
+                        starts: starts.to_vec(),
+                        ends: ends.to_vec(),
+                        steps: steps.to_vec(),
+                    },
+                    vec![out],
+                )
             }
             "Where" => {
                 let a = &self.shapes[node.input[0].as_str()];
@@ -565,7 +702,7 @@ impl<'a> ShapeInferer<'a> {
                     bail!("invalid Where({}, {}, {})", a, b, c);
                 }
 
-                vec![a.clone()]
+                (LogicalOpType::Where, vec![a.clone()])
             }
             "Equal" => {
                 let a = &self.shapes[node.input[0].as_str()];
@@ -582,7 +719,7 @@ impl<'a> ShapeInferer<'a> {
                     self.constants.insert(node.output[0].as_str(), out);
                 }
 
-                vec![a.clone()]
+                (LogicalOpType::Equal, vec![a.clone()])
             }
             "ReduceMean" => {
                 let axes =
@@ -603,7 +740,7 @@ impl<'a> ShapeInferer<'a> {
                     }
                 }
 
-                vec![out]
+                (LogicalOpType::ReduceMean, vec![out])
             }
             "Identity" => {
                 let input_shape = self.shapes[node.input[0].as_str()].clone();
@@ -636,7 +773,7 @@ impl<'a> ShapeInferer<'a> {
                 } else {
                     self.aliases.insert(&node.output[0], &node.input[0]);
                 }
-                vec![input_shape]
+                (LogicalOpType::ReshapeOnly, vec![input_shape])
             }
             other => unimplemented!("node type {}", other),
         };
