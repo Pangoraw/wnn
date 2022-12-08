@@ -295,7 +295,7 @@ pub async fn eval_graph(
         })
         .map(|node| {
             Op::new(
-                &runner.device,
+                &runner,
                 node.inputs
                     .iter()
                     // .take(effective_inputs(node))

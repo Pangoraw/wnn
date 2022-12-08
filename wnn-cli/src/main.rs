@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use protobuf::Message;
 use structopt::StructOpt;
 
@@ -35,11 +35,12 @@ fn main() -> anyhow::Result<()> {
     let outputs = pollster::block_on(eval_graph(&model.graph, init_mode, args.dump_folder))?;
 
     for (name, tensor) in outputs.iter() {
-        let filename = format!("activations/{name}.npy");
+        let filename = format!("activations/{}.npy", name.replace("/", "."));
         let data = tensor.raw_data();
         let desc = &tensor.desc;
 
-        npy::save_to_file(&filename, data, desc)?;
+        npy::save_to_file(&filename, data, desc)
+            .with_context(|| anyhow!("Saving to {filename}"))?;
     }
 
     Ok(())

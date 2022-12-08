@@ -103,6 +103,56 @@ pub(crate) enum LogicalOpType {
     ReshapeOnly,
 }
 
+impl std::fmt::Display for LogicalOpType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use LogicalOpType::*;
+
+        f.write_str(match self {
+            Sqrt => "Sqrt",
+            Tanh => "Tanh",
+            Erf => "Erf",
+            Gemm { .. } => "Gemm",
+            BatchNormalization { .. } => "BatchNormalization",
+            InstanceNormalization { .. } => "InstanceNormalization",
+            Resize { .. } => "Resize",
+            Softmax { .. } => "Softmax",
+            Gather { .. } => "Gather",
+            Slice { .. } => "Slice",
+            Constant => "Constant",
+            ConstantOfShape { .. } => "ConstantOfShape",
+            Concat { .. } => "Concat",
+            Cast { .. } => "Cast",
+            Cos => "Cos",
+            Sin => "Sin",
+            Relu => "Relu",
+            LeakyRelu { .. } => "LeakyRelu",
+            Sigmoid => "Sigmoid",
+            Pool {
+                ptype: PoolType::Max,
+                ..
+            } => "Maxpool",
+            Pool {
+                ptype: PoolType::Conv,
+                ..
+            } => "Conv",
+            Transpose { .. } => "Transpose",
+            ReduceMean => "ReduceMean",
+            Where => "Where",
+            Equal => "Equal",
+            Mul => "Mul",
+            Add => "Add",
+            Div => "Div",
+            Sub => "Sub",
+            Pow => "Pow",
+            Expand => "Expand",
+            GlobalAveragePool => "GlobalAveragePool",
+
+            Shape => "Shape",
+            ReshapeOnly => "ReshapeOnly",
+        })
+    }
+}
+
 pub(crate) struct LogicalOp<'a> {
     name: Option<&'a str>,
     pub(crate) inputs: Vec<BufferHandle>,
@@ -139,8 +189,9 @@ impl<'a> LogicalGraph<'a> {
     }
 
     fn add_buffer(&mut self, name: &'a str, desc: TensorDesc) -> BufferHandle {
+        let handle = self.buffers.len();
         self.buffers.push(LogicalBuffer { name, desc });
-        self.buffers.len()
+        handle
     }
 
     pub(crate) fn find_buffer_handle(&self, name: &str) -> Option<BufferHandle> {
@@ -257,45 +308,55 @@ impl<'a> LogicalGraph<'a> {
                 })
                 .collect();
 
-            // Don't include integer ops in the logical graph
-            // wgsl don't support i64.
-            if !is_longint_op {
-                self.ops.push(LogicalOp {
-                    name: Some(node.name()),
-                    inputs,
-                    outputs,
-                    op_type,
-                });
-            }
+            let op = LogicalOp {
+                name: Some(node.name()),
+                inputs,
+                outputs,
+                op_type,
+            };
 
             if &std::env::var_os("DUMP_INFERENCE")
                 .map(|s| s.to_str().unwrap().to_owned())
                 .unwrap_or_else(|| String::from("1"))
                 == "1"
             {
-                for (i, out) in node.output.iter().enumerate() {
+                for (i, out) in op.outputs.iter().enumerate() {
+                    let name = self.buffers[*out].name;
                     print!(
-                        "{}{}::{}",
+                        "{}[%{}]{}::{}",
+                        name,
                         out,
-                        shape_inferer.get_shape(out),
-                        dtype_inferer.get_type(out)
+                        shape_inferer.get_shape(name),
+                        dtype_inferer.get_type(name)
                     );
-                    if i < node.output.len() - 1 {
+                    if i < op.outputs.len() - 1 {
                         print!(", ");
                     }
                 }
-                print!("\t= {}[{}](", node.name(), node.op_type());
-                for (i, input) in node.input.iter().enumerate() {
-                    if input.is_empty() {
+                print!("\t= {}[{}](", op.name(), op.op_type());
+                for (i, input) in op.inputs.iter().enumerate() {
+                    let name = self.buffers[*input].name;
+                    if name.is_empty() {
                         print!("None");
                     } else {
-                        print!("{}{}", input, shape_inferer.get_shape(input));
+                        print!(
+                            "{}[%{}]{}",
+                            name,
+                            input,
+                            shape_inferer.get_shape(name)
+                        );
                     }
-                    if i < node.input.len() - 1 {
+                    if i < op.inputs.len() - 1 {
                         print!(", ");
                     }
                 }
                 println!(")");
+            }
+
+            // Don't include integer ops in the logical graph
+            // wgsl don't support i64.
+            if !is_longint_op {
+                self.ops.push(op);
             }
         }
 
@@ -310,7 +371,9 @@ impl<'a> LogicalGraph<'a> {
 fn effective_inputs_(op_type: &LogicalOpType, default: usize) -> usize {
     match op_type {
         LogicalOpType::ConstantOfShape { .. } => 0,
-        LogicalOpType::ReshapeOnly | LogicalOpType::Slice { .. } => 1, // These ops are tracked statically so we remove tensor "params"
+        LogicalOpType::Resize { .. } | LogicalOpType::ReshapeOnly | LogicalOpType::Slice { .. } => {
+            1
+        } // These ops are tracked statically so we remove tensor "params"
         _ => default,
     }
 }

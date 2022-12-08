@@ -173,8 +173,8 @@ pub(crate) fn compile_node(
             alpha,
             beta,
         } => {
-            context.insert("trans_a", &trans_a);
-            context.insert("trans_b", &trans_b);
+            context.insert("trans_a", &if *trans_a { 1 } else { 0 });
+            context.insert("trans_b", &if *trans_b { 1 } else { 0 });
 
             context.insert("alpha", &alpha);
             context.insert("beta", &beta);
@@ -538,6 +538,31 @@ pub(crate) fn compile_node(
         }
         LogicalOpType::Pool {
             ptype: PoolType::Conv,
+            group: _,
+            dilations: _,
+            k_strides,
+            pads,
+            kernel_shape,
+        } => {
+            context.insert("kernel_shape", kernel_shape);
+            context.insert("pads", pads);
+            context.insert("k_strides", k_strides);
+
+            let n_invocs = logical_graph
+                .get_desc(logical_op.outputs[0])
+                .shape
+                .numel()
+                .unwrap() as u64;
+            let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
+
+            ShaderInvocation {
+                file_name: "conv",
+                context,
+                dispatch: (dispatch_x as _, 1, 1),
+            }
+        }
+        LogicalOpType::Pool {
+            ptype: PoolType::Max,
             group: _,
             dilations: _,
             k_strides,

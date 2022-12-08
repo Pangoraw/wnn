@@ -61,7 +61,7 @@ pub(crate) struct Op {
 
 impl Op {
     pub(crate) fn new(
-        device: &wgpu::Device,
+        runner: &Runner,
         inputs: Vec<&TensorStorage>,
         outputs: Vec<&TensorStorage>,
         logical_op: &LogicalOp,
@@ -87,9 +87,9 @@ impl Op {
 
         // println!("{shader_source}");
 
-        let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let kernel = runner.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!(
-                "Shader {}[{:?}]",
+                "Shader {}[{}]",
                 logical_op.name(),
                 logical_op.op_type()
             )),
@@ -143,13 +143,14 @@ impl Op {
     }
 }
 
+pub(crate) type TensorHandle = usize;
 pub(crate) struct Runner {
-    pub(crate) device: wgpu::Device,
-    pub(crate) queue: wgpu::Queue,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
 
-    outputs: HashMap<BufferHandle, wgpu::Buffer>,
+    outputs: HashMap<TensorHandle, wgpu::Buffer>,
     slots: Vec<TensorStorage>,
-    which_slots: HashMap<BufferHandle, usize>,
+    which_slots: HashMap<BufferHandle, TensorHandle>,
 }
 
 const MAX_ALLOC_LIMIT: u64 = 7_500_000_000;
@@ -211,7 +212,7 @@ impl Runner {
                 .sum::<u64>()
     }
 
-    /// Performs tensor allocation by grouping allocations of the same size together.
+    /// Performs tensor allocation by reusing unused allocations.
     /// TODO: put inits, inputs and output buffers inside the allocation line too?
     pub(crate) fn allocate_tensors(
         &mut self,
@@ -322,13 +323,10 @@ impl Runner {
                         human_bytes::human_bytes(desc.size_of() as f64),
                     );
 
-                    self.slots
-                        .push(TensorStorage::new(&self.device, desc.clone(), None, force_readable));
+                    self.add_node(input, desc.clone(), force_readable)?;
                     slots_availability.push(Slot { free: false });
 
                     debug_assert!(self.slots.len() == slots_availability.len());
-
-                    self.which_slots.insert(*input, slot_index);
                 }
             }
 
@@ -337,7 +335,7 @@ impl Runner {
                 None => output,
             }) {
                 if !self.which_slots.contains_key(output) {
-                    log::warn!("found output which was not used before {output}");
+                    log::warn!("found output which was not used before (%{output})");
                     continue 'outputs;
                 }
 
@@ -382,7 +380,7 @@ impl Runner {
 
                 for (i, output) in node.outputs.iter().enumerate() {
                     print!(
-                        "{}(#{})",
+                        "%{}(#{})",
                         output,
                         match self.which_slots.get(output) {
                             Some(s) => *s as isize,
@@ -393,11 +391,11 @@ impl Runner {
                         print!(", ");
                     }
                 }
-                print!("\t= {}[{:?}](", node.name(), node.op_type());
+                print!("\t= {}[{}](", node.name(), node.op_type());
                 let input_len = effective_inputs(node);
                 for (i, input) in node.inputs.iter().take(input_len).enumerate() {
                     print!(
-                        "{}(#{})",
+                        "%{}(#{})",
                         input,
                         match self.which_slots.get(input) {
                             Some(s) => *s as isize,
@@ -435,6 +433,7 @@ impl Runner {
             anyhow::bail!("node {} was already inserted in runner", handle);
         }
 
+        let tensor_idx = self.slots.len();
         if is_output {
             let read_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Read buffer {handle}")),
@@ -442,10 +441,9 @@ impl Runner {
                 size: buf_size as _,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             });
-            self.outputs.insert(*handle, read_buffer);
+            self.outputs.insert(tensor_idx, read_buffer);
         }
 
-        let tensor_idx = self.slots.len();
         self.slots.push(storage);
         self.which_slots.insert(*handle, tensor_idx);
         Ok(())
@@ -459,7 +457,8 @@ impl Runner {
     ) -> anyhow::Result<()> {
         // TODO: Move this function out of gpu::Runner.
         if tensor.data_location() == crate::onnx::tensor_proto::DataLocation::EXTERNAL {
-            return self.add_node_with_init(handle, desc, &external_data(tensor)?); }
+            return self.add_node_with_init(handle, desc, &external_data(tensor)?);
+        }
 
         let raw_data = match desc.dtype {
             DataType::F32 if !tensor.float_data.is_empty() => {
@@ -505,7 +504,13 @@ impl Runner {
     }
 
     pub(crate) async fn read_bytes(&self, handle: &BufferHandle) -> anyhow::Result<Vec<u8>> {
-        let read_buf = &self.outputs[handle];
+        if !self.outputs.contains_key(&self.which_slots[handle]) {
+            bail!(
+                "output buffer not found for %{handle}(#{})",
+                self.which_slots[handle]
+            );
+        }
+        let read_buf = &self.outputs[&self.which_slots[handle]];
 
         let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
         let slice = read_buf.slice(..);
@@ -542,7 +547,7 @@ impl Runner {
         }
 
         for (output, target_buffer) in self.outputs.iter() {
-            let source_buffer = &self.slots[self.which_slots[output]];
+            let source_buffer = &self.slots[*output];
             encoder.copy_buffer_to_buffer(
                 &source_buffer.buffer,
                 0,
