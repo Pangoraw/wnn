@@ -87,25 +87,29 @@ impl Op {
 
         // println!("{shader_source}");
 
-        let kernel = runner.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&format!(
-                "Shader {}[{}]",
-                logical_op.name(),
-                logical_op.op_type()
-            )),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(shader_source)),
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(&format!(
-                "Compute Pipeline {}[{:?}]",
-                logical_op.name(),
-                logical_op.op_type()
-            )),
-            layout: None,
-            module: &kernel,
-            entry_point: "main",
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let kernel = runner
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(&format!(
+                    "Shader {}[{}]",
+                    logical_op.name(),
+                    logical_op.op_type()
+                )),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::from(shader_source)),
+            });
+        let pipeline = runner
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(&format!(
+                    "Compute Pipeline {}[{:?}]",
+                    logical_op.name(),
+                    logical_op.op_type()
+                )),
+                layout: None,
+                module: &kernel,
+                entry_point: "main",
+            });
+        let bind_group = runner.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(&format!(
                 "Bind Group Compute {}[{:?}]",
                 logical_op.name(),

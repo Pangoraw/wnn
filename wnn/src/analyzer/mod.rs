@@ -339,12 +339,7 @@ impl<'a> LogicalGraph<'a> {
                     if name.is_empty() {
                         print!("None");
                     } else {
-                        print!(
-                            "{}[%{}]{}",
-                            name,
-                            input,
-                            shape_inferer.get_shape(name)
-                        );
+                        print!("{}[%{}]{}", name, input, shape_inferer.get_shape(name));
                     }
                     if i < op.inputs.len() - 1 {
                         print!(", ");
