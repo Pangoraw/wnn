@@ -180,7 +180,7 @@ pub(crate) fn read_from_bytes(bytes: &[u8]) -> Result<(TensorDesc, &[u8])> {
     Ok((desc, slice))
 }
 
-pub(crate) fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<u8>)> {
+pub fn read_from_file(filename: &str) -> Result<(TensorDesc, Vec<u8>)> {
     let mut file = std::fs::OpenOptions::new().read(true).open(filename)?;
     let mut content = Vec::new();
     file.read_to_end(&mut content)?;

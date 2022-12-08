@@ -12,3 +12,4 @@ env_logger = "0.9"
 anyhow = "1.0.65"
 structopt = "0.3.26"
 wnn = { path = "../wnn" }
+bytemuck = "1.12.3"

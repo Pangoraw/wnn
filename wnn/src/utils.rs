@@ -66,7 +66,7 @@ pub(crate) fn external_data(tensor: &onnx::TensorProto) -> anyhow::Result<Vec<u8
     // TODO: Optimize by keeping the file descriptor open
     let mut file = std::fs::OpenOptions::new()
         .read(true)
-        .open(&format!("/home/paul/Projects/ONNX.jl/{location}"))
+        .open(format!("/home/paul/Projects/ONNX.jl/{location}"))
         .with_context(|| anyhow::anyhow!("when open file '{location}'"))?;
     file.seek(std::io::SeekFrom::Start(offset))?;
 

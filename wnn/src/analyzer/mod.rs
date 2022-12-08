@@ -12,8 +12,8 @@ mod shape_inference;
 mod type_inference;
 
 pub(crate) type BufferHandle = usize;
-pub(crate) struct LogicalBuffer<'a> {
-    name: &'a str,
+pub(crate) struct LogicalBuffer {
+    name: Option<String>,
     desc: TensorDesc,
 }
 
@@ -153,55 +153,83 @@ impl std::fmt::Display for LogicalOpType {
     }
 }
 
-pub(crate) struct LogicalOp<'a> {
-    name: Option<&'a str>,
+pub(crate) struct LogicalOp {
+    name: Option<String>,
     pub(crate) inputs: Vec<BufferHandle>,
     pub(crate) outputs: Vec<BufferHandle>,
     op_type: LogicalOpType,
 }
 
-impl<'a> LogicalOp<'a> {
-    pub(crate) fn name(&self) -> &'a str {
-        self.name.unwrap_or("unknown")
+impl LogicalOp {
+    pub(crate) fn name(&self) -> &str {
+        self.name.as_deref().unwrap_or("unknown")
     }
 
-    pub(crate) fn op_type(&'a self) -> &'a LogicalOpType {
+    pub(crate) fn op_type(&self) -> &LogicalOpType {
         &self.op_type
     }
 }
 
-pub(crate) struct LogicalGraph<'a> {
-    pub(crate) buffers: Vec<LogicalBuffer<'a>>,
-    pub(crate) ops: Vec<LogicalOp<'a>>,
+pub(crate) struct LogicalGraph {
+    pub(crate) buffers: Vec<LogicalBuffer>,
+    pub(crate) ops: Vec<LogicalOp>,
+    pub(crate) inputs: Vec<BufferHandle>,
+    pub(crate) outputs: Vec<BufferHandle>,
 }
 
-impl<'a> LogicalGraph<'a> {
+impl LogicalGraph {
     pub(crate) fn new(
-        graph: &'a onnx::GraphProto,
+        graph: &onnx::GraphProto,
         dim_mappings: &HashMap<&str, shape::Dimension>,
-    ) -> anyhow::Result<LogicalGraph<'a>> {
+    ) -> anyhow::Result<LogicalGraph> {
         let mut logical_graph = Self {
             buffers: Vec::new(),
             ops: Vec::with_capacity(graph.node.len()),
+            inputs: Vec::with_capacity(graph.input.len()),
+            outputs: Vec::with_capacity(graph.output.len()),
         };
         logical_graph.infer_graph(graph, dim_mappings)?;
+
+        for input in &graph.input {
+            if graph
+                .initializer
+                .iter()
+                .any(|initializer| initializer.name() == input.name())
+            {
+                continue;
+            }
+
+            logical_graph
+                .inputs
+                .push(logical_graph.find_buffer_handle(input.name()).unwrap());
+        }
+
+        for output in &graph.output {
+            logical_graph
+                .outputs
+                .push(logical_graph.find_buffer_handle(output.name()).unwrap());
+        }
+
         Ok(logical_graph)
     }
 
-    fn add_buffer(&mut self, name: &'a str, desc: TensorDesc) -> BufferHandle {
+    fn add_buffer(&mut self, name: &str, desc: TensorDesc) -> BufferHandle {
         let handle = self.buffers.len();
-        self.buffers.push(LogicalBuffer { name, desc });
+        self.buffers.push(LogicalBuffer {
+            name: Some(String::from(name)),
+            desc,
+        });
         handle
     }
 
     pub(crate) fn find_buffer_handle(&self, name: &str) -> Option<BufferHandle> {
-        self.buffers.iter().enumerate().find_map(|(index, buffer)| {
-            if buffer.name == name {
-                Some(index)
-            } else {
-                None
-            }
-        })
+        self.buffers
+            .iter()
+            .enumerate()
+            .find_map(|(index, buffer)| match &buffer.name {
+                Some(bufname) if bufname == name => Some(index),
+                _ => None,
+            })
     }
 
     pub(crate) fn get_desc(&self, handle: BufferHandle) -> &TensorDesc {
@@ -224,7 +252,7 @@ impl<'a> LogicalGraph<'a> {
 
     fn infer_graph(
         &mut self,
-        graph: &'a onnx::GraphProto,
+        graph: &onnx::GraphProto,
         dim_mappings: &HashMap<&str, shape::Dimension>,
     ) -> anyhow::Result<()> {
         let mut shape_inferer = shape_inference::ShapeInferer::new(graph);
@@ -309,7 +337,7 @@ impl<'a> LogicalGraph<'a> {
                 .collect();
 
             let op = LogicalOp {
-                name: Some(node.name()),
+                name: Some(String::from(node.name())),
                 inputs,
                 outputs,
                 op_type,
@@ -321,7 +349,10 @@ impl<'a> LogicalGraph<'a> {
                 == "1"
             {
                 for (i, out) in op.outputs.iter().enumerate() {
-                    let name = self.buffers[*out].name;
+                    let name = self.buffers[*out]
+                        .name
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("buffer %{out} has no name"))?;
                     print!(
                         "{}[%{}]{}::{}",
                         name,
@@ -335,7 +366,10 @@ impl<'a> LogicalGraph<'a> {
                 }
                 print!("\t= {}[{}](", op.name(), op.op_type());
                 for (i, input) in op.inputs.iter().enumerate() {
-                    let name = self.buffers[*input].name;
+                    let name = self.buffers[*input]
+                        .name
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("buffer %{input} has no name"))?;
                     if name.is_empty() {
                         print!("None");
                     } else {
@@ -358,8 +392,9 @@ impl<'a> LogicalGraph<'a> {
         Ok(())
     }
 
-    pub(crate) fn names(&'a self) -> Vec<&'a str> {
-        self.buffers.iter().map(|buf| buf.name).collect()
+    pub(crate) fn find_name(&self, handle: &BufferHandle) -> &str {
+        let name = &self.buffers[*handle].name;
+        name.as_deref().unwrap_or("unknown")
     }
 }
 

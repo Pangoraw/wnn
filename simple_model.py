@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torchvision.models import resnet18, resnet50
 from PIL import Image
 
-resnet = resnet50(pretrained=True)
+resnet = resnet18(pretrained=True)
 
 class Model(nn.Module):
     def __init__(self) -> None:
@@ -31,7 +31,7 @@ class Model(nn.Module):
         x = x / (255. * torch.tensor([0.229, 0.224, 0.225])[None,:,None,None]) - \
                         torch.tensor([0.485, 0.456, 0.406])[None,:,None,None]
         return self.resnet(x)
-
+        # return x.permute(1, 0)
 
 model = Model()
 model = model.eval()
@@ -41,11 +41,15 @@ model = model.eval()
 # x = torch.ones(1,4,64,64)
 x = torch.ones(1,224,224,4)
 #x = torch.arange(4, dtype=torch.float32).view(1,1,1,4)
+# x = torch.ones(1,4,64,64)
+# x = torch.ones(2)
 
-if True:
-    torch.onnx.export(
-        model,
-        x,
-        "./simple_model.onnx",
-        do_constant_folding=True,
-    )
+#with torch.no_grad():
+    #print(model(x))
+
+torch.onnx.export(
+    model,
+    x,
+    "./wnn-wasm/resnet18.onnx",
+    do_constant_folding=True,
+)

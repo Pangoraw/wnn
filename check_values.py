@@ -64,6 +64,7 @@ debug_shapes = False
 #init = "arange"
 init = args.init
 #init = "from_file"
+# init = "arange"
 if init == "ones":
     input = np.ones(input_shape, dtype=np.float32)
 elif init == "range":

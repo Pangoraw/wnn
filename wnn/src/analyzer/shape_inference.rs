@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 
 use crate::shape::Shape;
 use crate::utils::*;
@@ -570,8 +570,10 @@ impl<'a> ShapeInferer<'a> {
             "Cast" => {
                 let target_type = DataType::from_int(
                     get_attr_int(node, "to")
-                        .ok_or_else(|| anyhow!("could not find attribute 'to'"))?
-                        as i32,
+                        .ok_or_else(|| anyhow!("could not find attribute 'to'"))
+                        .with_context(|| {
+                            anyhow!("when building {}[{}]", node.name(), node.op_type())
+                        })? as i32,
                 )?;
                 (
                     LogicalOpType::Cast { target_type },

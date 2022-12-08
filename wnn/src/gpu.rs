@@ -16,16 +16,31 @@ pub(crate) struct TensorStorage {
     buffer: wgpu::Buffer,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NodeType {
+    /// Rewritable buffers
+    Input,
+    /// Readable buffers
+    Output,
+    /// Regular buffer
+    Intermediary,
+}
+
 impl TensorStorage {
     pub(crate) fn size(&self) -> u64 {
         self.buffer.size()
     }
 
-    fn new(device: &wgpu::Device, desc: TensorDesc, label: Option<&str>, is_output: bool) -> Self {
-        let usage = if is_output {
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC
-        } else {
-            wgpu::BufferUsages::STORAGE
+    fn new(
+        device: &wgpu::Device,
+        desc: TensorDesc,
+        label: Option<&str>,
+        node_type: NodeType,
+    ) -> Self {
+        let usage = match node_type {
+            NodeType::Output => wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            NodeType::Input => wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            NodeType::Intermediary => wgpu::BufferUsages::STORAGE,
         };
 
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -152,6 +167,7 @@ pub(crate) struct Runner {
     device: wgpu::Device,
     queue: wgpu::Queue,
 
+    inputs: HashMap<TensorHandle, wgpu::Buffer>,
     outputs: HashMap<TensorHandle, wgpu::Buffer>,
     slots: Vec<TensorStorage>,
     which_slots: HashMap<BufferHandle, TensorHandle>,
@@ -201,6 +217,7 @@ impl Runner {
         Ok(Self {
             device,
             queue,
+            inputs: HashMap::new(),
             outputs: HashMap::new(),
             slots: Vec::new(),
             which_slots: HashMap::new(),
@@ -327,7 +344,15 @@ impl Runner {
                         human_bytes::human_bytes(desc.size_of() as f64),
                     );
 
-                    self.add_node(input, desc.clone(), force_readable)?;
+                    self.add_node(
+                        input,
+                        desc.clone(),
+                        if force_readable {
+                            NodeType::Output
+                        } else {
+                            NodeType::Intermediary
+                        },
+                    )?;
                     slots_availability.push(Slot { free: false });
 
                     debug_assert!(self.slots.len() == slots_availability.len());
@@ -429,23 +454,35 @@ impl Runner {
         &mut self,
         handle: &BufferHandle,
         desc: TensorDesc,
-        is_output: bool,
+        node_type: NodeType,
     ) -> anyhow::Result<()> {
         let buf_size = desc.size_of();
-        let storage = TensorStorage::new(&self.device, desc, None, is_output);
+        let storage = TensorStorage::new(&self.device, desc, None, node_type);
         if self.which_slots.contains_key(handle) {
             anyhow::bail!("node {} was already inserted in runner", handle);
         }
 
         let tensor_idx = self.slots.len();
-        if is_output {
-            let read_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Read buffer {handle}")),
-                mapped_at_creation: false,
-                size: buf_size as _,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            });
-            self.outputs.insert(tensor_idx, read_buffer);
+        match node_type {
+            NodeType::Output => {
+                let read_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Read buffer {handle}")),
+                    mapped_at_creation: false,
+                    size: buf_size as _,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                });
+                self.outputs.insert(tensor_idx, read_buffer);
+            }
+            NodeType::Input => {
+                let write_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Read buffer {handle}")),
+                    mapped_at_creation: false,
+                    size: buf_size as _,
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
+                });
+                self.inputs.insert(tensor_idx, write_buffer);
+            }
+            NodeType::Intermediary => {}
         }
 
         self.slots.push(storage);
@@ -540,6 +577,18 @@ impl Runner {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Compute Command Encoder"),
             });
+
+        for (input, content_buf) in self.inputs.iter() {
+            let dest_buffer = &self.slots[*input];
+            encoder.copy_buffer_to_buffer(
+                content_buf,
+                0,
+                &dest_buffer.buffer,
+                0,
+                dest_buffer.size(),
+            );
+        }
+
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Compute Pass"),
@@ -562,5 +611,34 @@ impl Runner {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    pub(crate) async fn write_node(
+        &self,
+        input_handle: BufferHandle,
+        input: &[u8],
+    ) -> anyhow::Result<()> {
+        let tensor_handle = self.which_slots[&input_handle];
+        let src_buf = &self.inputs[&tensor_handle];
+
+        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+        let slice = src_buf.slice(..);
+        slice.map_async(wgpu::MapMode::Write, move |res| {
+            tx.send(res).unwrap();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+
+        match rx.receive().await {
+            Some(Ok(())) => {
+                {
+                    let mut range = slice.get_mapped_range_mut();
+                    range.copy_from_slice(input);
+                }
+                src_buf.unmap();
+                Ok(())
+            }
+            Some(Err(err)) => Err(anyhow!("error: reading buffer: {err}")),
+            _ => Err(anyhow!("error: reading buffer")),
+        }
     }
 }

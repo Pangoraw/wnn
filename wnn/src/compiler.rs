@@ -173,8 +173,8 @@ pub(crate) fn compile_node(
             alpha,
             beta,
         } => {
-            context.insert("trans_a", &if *trans_a { 1 } else { 0 });
-            context.insert("trans_b", &if *trans_b { 1 } else { 0 });
+            context.insert("trans_a", &i32::from(*trans_a));
+            context.insert("trans_b", &i32::from(*trans_b));
 
             context.insert("alpha", &alpha);
             context.insert("beta", &beta);

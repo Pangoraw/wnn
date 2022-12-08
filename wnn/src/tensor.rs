@@ -14,7 +14,7 @@ pub enum DataType {
 }
 
 impl DataType {
-    pub(crate) fn from_int(dtype: i32) -> anyhow::Result<Self> {
+    pub fn from_int(dtype: i32) -> anyhow::Result<Self> {
         Ok(match dtype {
             1 => DataType::F32,
             6 => DataType::I32,
