@@ -29,6 +29,15 @@ pub(crate) enum PoolType {
 }
 
 #[derive(Debug)]
+pub(crate) enum UnaryOpType {
+    Relu,
+    Cos,
+    Sin,
+    Exp,
+    Sqrt,
+}
+
+#[derive(Debug)]
 pub(crate) enum LogicalOpType {
     Sqrt,
     Tanh,
@@ -38,6 +47,7 @@ pub(crate) enum LogicalOpType {
         trans_b: bool,
         alpha: f32,
         beta: f32,
+        activation: Option<UnaryOpType>,
     },
     BatchNormalization {
         epsilon: f32,
@@ -72,6 +82,7 @@ pub(crate) enum LogicalOpType {
     },
     Cos,
     Sin,
+    Exp,
     Relu,
     LeakyRelu {
         alpha: f32,
@@ -84,6 +95,7 @@ pub(crate) enum LogicalOpType {
         k_strides: [i64; 2],
         pads: [i64; 4],
         kernel_shape: [i64; 2],
+        activation: Option<UnaryOpType>,
     },
     Transpose {
         perm: Vec<i64>,
@@ -124,6 +136,7 @@ impl std::fmt::Display for LogicalOpType {
             Cast { .. } => "Cast",
             Cos => "Cos",
             Sin => "Sin",
+            Exp => "Exp",
             Relu => "Relu",
             LeakyRelu { .. } => "LeakyRelu",
             Sigmoid => "Sigmoid",
@@ -167,6 +180,10 @@ impl LogicalOp {
 
     pub(crate) fn op_type(&self) -> &LogicalOpType {
         &self.op_type
+    }
+
+    pub(crate) fn op_type_mut(&mut self) -> &mut LogicalOpType {
+        &mut self.op_type
     }
 }
 

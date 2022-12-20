@@ -115,6 +115,7 @@ impl<'a> ShapeInferer<'a> {
                         trans_b,
                         alpha,
                         beta,
+                        activation: None,
                     },
                     vec![out_dim],
                 )
@@ -406,6 +407,7 @@ impl<'a> ShapeInferer<'a> {
                         k_strides: [strides[0], strides[1]],
                         pads: [pads[0], pads[1], pads[2], pads[3]],
                         kernel_shape: [kernel_shape[0], kernel_shape[1]],
+                        activation: None,
                     },
                     vec![out_shape],
                 )
@@ -618,6 +620,10 @@ impl<'a> ShapeInferer<'a> {
             ),
             "Cos" => (
                 LogicalOpType::Cos,
+                vec![self.shapes[node.input[0].as_str()].clone()],
+            ),
+            "Exp" => (
+                LogicalOpType::Exp,
                 vec![self.shapes[node.input[0].as_str()].clone()],
             ),
             "Slice" => {

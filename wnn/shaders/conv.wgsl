@@ -25,14 +25,14 @@ var<storage, read> weight: array<T>;
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     {% for group in range(end=num_groups) %}
 
-    let x = {{ num_groups }}u * global_id.x{% if group > 0 %} + {{ group }}u{% endif %};
+    let gdx = {% if num_groups != 1 %}{{ num_groups }}u * {% endif %}global_id.x{% if group > 0 %} + {{ group }}u{% endif %};
 
-    if x >= {{ o_lens[0] }}u {
+    if gdx >= {{ o_lens[0] }}u {
         return;
     }
 
-    let b = x / {{ o_strides[0][0] }}u;
-    var rest = x % {{ o_strides[0][0] }}u;
+    let b = gdx / {{ o_strides[0][0] }}u;
+    var rest = gdx % {{ o_strides[0][0] }}u;
 
     let out_chan = rest / {{ o_strides[0][1] }}u;
     rest = rest % {{ o_strides[0][1] }}u;
@@ -44,7 +44,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let root_input_index = b * {{ i_strides[0][0] }}u;
     let root_weight_index = out_chan * {{ i_strides[1][0] }}u;
 
-    var tmpsum: T = {% if i_lens | length == 3 %}bias[out_chan]{% else %}0.{% endif %};
+    var x: T = {% if i_lens | length == 3 %}bias[out_chan]{% else %}0.{% endif %};
     for (var input_chan: u32 = 0u; input_chan < {{ i_sizes[0][1] }}u; input_chan = input_chan + 1u) {
         let base_input_index =
             root_input_index
@@ -71,14 +71,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             i * {{ i_strides[1][2] }}u +
                             j * {{ i_strides[1][3] }}u;
 
-                        tmpsum = tmpsum + input[input_index] * weight[weight_index];
+                        x = x + input[input_index] * weight[weight_index];
                     }
                 }
             }
         }
     }
 
-    output[x] = tmpsum;
+    output[gdx] = {% if act %}{{act}}{% else %}x{% endif %};
 
     {% endfor %}
 }

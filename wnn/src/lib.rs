@@ -21,6 +21,7 @@ mod gpu;
 pub mod npy;
 pub mod onnx;
 pub mod shape;
+mod simplifier;
 pub mod tensor;
 mod utils;
 
@@ -52,7 +53,11 @@ impl CompiledModel {
             ("width", shape::Dimension::Concrete(64)),
         ]);
 
-        let log_graph = analyzer::LogicalGraph::new(graph, &dim_mappings)?;
+        let log_graph = {
+            let mut log_graph = analyzer::LogicalGraph::new(graph, &dim_mappings)?;
+            simplifier::simplify(&mut log_graph)?;
+            log_graph
+        };
 
         #[cfg(debug_assertions)]
         validate_graph(graph, &log_graph)?;

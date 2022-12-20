@@ -159,6 +159,27 @@ fn add_invocs_to_context(context: &mut tera::Context, n_invocs: u64) -> u64 {
     dispatch_x
 }
 
+/// Some ops have an optional activation function applied at the end, so we add its
+/// implementation f(x) -> ... to the context if it is available.
+fn maybe_add_activation(
+    context: &mut tera::Context,
+    activation: &Option<crate::analyzer::UnaryOpType>,
+) {
+    if let Some(act) = activation {
+        context.insert(
+            "act",
+            match act {
+                crate::analyzer::UnaryOpType::Relu => "max(x, T())",
+                crate::analyzer::UnaryOpType::Cos => "cos(x)",
+                crate::analyzer::UnaryOpType::Sin => "sin(x)",
+                crate::analyzer::UnaryOpType::Exp => "exp(x)",
+                crate::analyzer::UnaryOpType::Sqrt => "sqrt(x)",
+                // other => unimplemented!("{:?}", other),
+            },
+        );
+    }
+}
+
 /// Generates the relevant `ShaderInvocation` for a given node using its input descriptions and
 /// attributes, the corresponding wgsl code can then be retrieved using `ShaderInvocation::to_wgsl()`.
 pub(crate) fn compile_node(
@@ -172,6 +193,7 @@ pub(crate) fn compile_node(
             trans_b,
             alpha,
             beta,
+            activation,
         } => {
             context.insert("trans_a", &i32::from(*trans_a));
             context.insert("trans_b", &i32::from(*trans_b));
@@ -185,6 +207,7 @@ pub(crate) fn compile_node(
                 .numel()
                 .unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
+            maybe_add_activation(&mut context, activation);
 
             ShaderInvocation {
                 file_name: "matmul",
@@ -543,6 +566,7 @@ pub(crate) fn compile_node(
             k_strides,
             pads,
             kernel_shape,
+            activation,
         } => {
             context.insert("kernel_shape", kernel_shape);
             context.insert("pads", pads);
@@ -554,6 +578,8 @@ pub(crate) fn compile_node(
                 .numel()
                 .unwrap() as u64;
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
+
+            maybe_add_activation(&mut context, activation);
 
             ShaderInvocation {
                 file_name: "conv",
@@ -568,6 +594,7 @@ pub(crate) fn compile_node(
             k_strides,
             pads,
             kernel_shape,
+            activation: None,
         } => {
             context.insert("kernel_shape", kernel_shape);
             context.insert("pads", pads);
