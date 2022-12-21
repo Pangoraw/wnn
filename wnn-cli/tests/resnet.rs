@@ -75,7 +75,7 @@ fn test_resnet() -> anyhow::Result<()> {
             }
 
             let expected_score = 4.6976986;
-            if max != expected_score {
+            if max - expected_score > 1e-5 {
                 bail!("invalid score for class {max}, expected {expected_score}");
             }
         }
