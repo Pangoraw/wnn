@@ -76,12 +76,13 @@
         } from "./pkg/wnn_wasm.js"
 
         const webGpuIsNotEnableSoStopEverything = () => {
+            document.querySelector(".warning").style.display = "block"
             throw "error: WebGPU is not available!";
         }
 
         if (!("gpu" in navigator)) {
-            document.querySelector(".warning").style.display = "block"
-            webGpuIsNotEnableSoStopEverything() }
+            webGpuIsNotEnableSoStopEverything()
+        }
 
         const [modelBuf, mod] = await Promise.all([
             fetch("resnet.onnx").then(res => res.arrayBuffer()),
@@ -1198,6 +1199,7 @@ class Model(torch.nn.Module):
         # Apply the resnet
         return self.resnet(x)
 
+x = torch.randn(1, 3, 224, 224, dtype=torch.float32)
 torch.onnx.export(
     Model().eval(),
     x,
