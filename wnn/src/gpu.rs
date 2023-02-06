@@ -17,7 +17,7 @@ pub(crate) struct TensorStorage {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum NodeType {
+pub(crate) enum BufferType {
     /// Rewritable buffers
     Input,
     /// Readable buffers
@@ -35,12 +35,12 @@ impl TensorStorage {
         device: &wgpu::Device,
         desc: TensorDesc,
         label: Option<&str>,
-        node_type: NodeType,
+        node_type: BufferType,
     ) -> Self {
         let usage = match node_type {
-            NodeType::Output => wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            NodeType::Input => wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            NodeType::Intermediary => wgpu::BufferUsages::STORAGE,
+            BufferType::Output => wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            BufferType::Input => wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            BufferType::Intermediary => wgpu::BufferUsages::STORAGE,
         };
 
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -348,9 +348,9 @@ impl Runner {
                         input,
                         desc.clone(),
                         if force_readable {
-                            NodeType::Output
+                            BufferType::Output
                         } else {
-                            NodeType::Intermediary
+                            BufferType::Intermediary
                         },
                     )?;
                     slots_availability.push(Slot { free: false });
@@ -454,7 +454,7 @@ impl Runner {
         &mut self,
         handle: &BufferHandle,
         desc: TensorDesc,
-        node_type: NodeType,
+        node_type: BufferType,
     ) -> anyhow::Result<()> {
         let buf_size = desc.size_of();
         let storage = TensorStorage::new(&self.device, desc, None, node_type);
@@ -464,7 +464,7 @@ impl Runner {
 
         let tensor_idx = self.slots.len();
         match node_type {
-            NodeType::Output => {
+            BufferType::Output => {
                 let read_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(&format!("Read buffer {handle}")),
                     mapped_at_creation: false,
@@ -473,7 +473,7 @@ impl Runner {
                 });
                 self.outputs.insert(tensor_idx, read_buffer);
             }
-            NodeType::Input => {
+            BufferType::Input => {
                 let write_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(&format!("Read buffer {handle}")),
                     mapped_at_creation: false,
@@ -482,7 +482,7 @@ impl Runner {
                 });
                 self.inputs.insert(tensor_idx, write_buffer);
             }
-            NodeType::Intermediary => {}
+            BufferType::Intermediary => {}
         }
 
         self.slots.push(storage);

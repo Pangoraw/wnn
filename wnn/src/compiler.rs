@@ -353,17 +353,35 @@ pub(crate) fn compile_node(
                 )
             })?;
 
-            if logical_op.inputs.len() != 2 {
-                bail!(
-                    "unsupported number of input {} for Concat",
-                    logical_op.inputs.len()
-                );
-            }
-
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs as u64);
+
+            fn cumsum(v: Vec<usize>) -> Vec<usize> {
+                let mut s = 0;
+                v.iter()
+                    .map(|x| {
+                        s += x;
+                        s
+                    })
+                    .collect()
+            }
 
             let axis = out_shape.reldim(*axis as isize);
             context.insert("axis", &axis);
+
+            let mut vec = cumsum(
+                logical_op
+                    .inputs
+                    .iter()
+                    .map(|input| {
+                        logical_graph
+                            .get_desc(*input)
+                            .shape
+                            .concrete_size(axis as isize)
+                    })
+                    .collect::<anyhow::Result<Vec<usize>>>()?,
+            );
+            vec.pop();
+            context.insert("cum_inputs_size", &vec);
 
             ShaderInvocation {
                 file_name: "concat",
@@ -628,7 +646,10 @@ pub(crate) fn compile_node(
 /// Basically, we only currently support Shape in static analysis and Constant are
 /// added as initializer before any allocation happens.
 pub(crate) fn is_untracked_op(op_type: &LogicalOpType) -> bool {
-    matches!(op_type, LogicalOpType::Shape | LogicalOpType::Constant)
+    matches!(
+        op_type,
+        LogicalOpType::Shape | LogicalOpType::Constant { .. }
+    )
 }
 
 fn ceil(x: u64, factor: u64) -> u64 {

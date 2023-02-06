@@ -14,16 +14,19 @@ args = parser.parse_args()
 
 outputs = {}
 
+
 def parse_name(name):
-    name, shape = name.split('(')
+    name, shape = name.split("(")
     return name, [int(t) for t in shape[:-1].split(",")]
+
 
 act_dir = Path("./activations")
 for fname in os.listdir(act_dir):
     fpath = act_dir / fname
-    name,_ = os.path.splitext(fpath.name)
+    name, _ = os.path.splitext(fpath.name)
 
-    if name == "": break
+    if name == "":
+        break
 
     # print(name)
     outputs[name] = np.load(fpath)
@@ -52,33 +55,45 @@ for idx, node in enumerate(shape_info.graph.value_info):
 for output in model.graph.output:
     names.append(output.name)
 
-model.graph.output.extend(value_info_protos)  #  in inference stage, these tensor will be added to output dict.
+model.graph.output.extend(
+    value_info_protos
+)  #  in inference stage, these tensor will be added to output dict.
 onnx.checker.check_model(model)
-onnx.save(model, './test.onnx')
+onnx.save(model, "./test.onnx")
 
-onnx_input = model.graph.input[0]
-input_shape = tuple(d.dim_value if d.dim_value != 0 else 1 for d in onnx_input.type.tensor_type.shape.dim)
+onnx_inputs = model.graph.input
+input_shapes = [
+    tuple(
+        d.dim_value if d.dim_value != 0 else 1
+        for d in onnx_input.type.tensor_type.shape.dim
+    )
+    for onnx_input in onnx_inputs
+]
 
-debug_shapes = False 
+debug_shapes = False
 
-#init = "arange"
+# init = "arange"
 init = args.init
-#init = "from_file"
+# init = "from_file"
 # init = "arange"
 if init == "ones":
-    input = np.ones(input_shape, dtype=np.float32)
+    inputs = [np.ones(input_shape, dtype=np.float32) for input_shape in input_shapes]
 elif init == "range":
-    s = 1
-    for i in input_shape:
-        s *= i
-    print(s)
-    input = np.arange(s, dtype=np.float32).reshape(input_shape)
+    inputs = []
+    for input_shape in input_shapes:
+        s = 1
+        for i in input_shape:
+            s *= i
+        print(s)
+        inputs.append(np.arange(s, dtype=np.float32).reshape(input_shape))
 else:
-    #input = np.load(Path("~/irisa/diffusers/latents.npy").expanduser())
-    input = np.load(Path(init).expanduser())
+    # input = np.load(Path("~/irisa/diffusers/latents.npy").expanduser())
+    inputs = np.load(Path(init).expanduser())
 
 sess = ort.InferenceSession("./test.onnx")
-ort_outputs = sess.run(names, {onnx_input.name: input}) 
+ort_outputs = sess.run(
+    names, {onnx_input.name: input for (onnx_input, input) in zip(onnx_inputs, inputs)}
+)
 
 THRESHOLD = 1e-1
 
@@ -93,27 +108,29 @@ if debug_shapes:
 print()
 print("checking equality")
 
-with open("./classes.txt") as f:
-    classes = f.readlines()
+# with open("./classes.txt") as f:
+    # classes = f.readlines()
 
 # for (k, a), b in zip(outputs.items(), ort_outputs):
 for i, k in enumerate(names):
     a = outputs[k]
     b = ort_outputs[i]
 
-    not_equal = (np.abs(a - b) > THRESHOLD)
+    print(a.shape, b.shape)
+
+    not_equal = np.abs(a - b) > THRESHOLD
     if a.size != b.size:
         print("not equal", k, a.shape, a.size, b.shape, b.size)
-        #break
+        # break
     elif not_equal.sum() != 0:
         print(f"{not_equal.sum()}/{not_equal.size} not equal {k}")
-        # for f in a.flatten()[0:10]:
-        #     print(f"{f:1.03f} ", end="")
-        # print()
-        # for f in b.flatten()[0:10]:
-        #     print(f"{f:1.03f} ", end="")
-        # print()
-        #break
+        for f in a.flatten()[0:10]:
+            print(f"{f:1.03f} ", end="")
+        print()
+        for f in b.flatten()[0:10]:
+            print(f"{f:1.03f} ", end="")
+        print()
+        # break
     else:
         print(f"{k} ✅")
         topk = 2
@@ -129,4 +146,3 @@ for i, k in enumerate(names):
             [classes[i] for i in np.argsort(-a)[0,:topk]],
         )
         """
-

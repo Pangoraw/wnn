@@ -1,16 +1,13 @@
 use tensor::CPUTensor;
 
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Sub,
-};
+use std::{collections::HashMap, ops::Sub};
 
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::{
     analyzer::LogicalOpType,
     compiler::is_untracked_op,
-    gpu::{NodeType, Op},
+    gpu::{BufferType, Op},
     shape::Shape,
     tensor::DataType,
 };
@@ -95,58 +92,29 @@ impl CompiledModel {
             runner.add_node(
                 input,
                 desc.clone(),
-                NodeType::Input, // &floats,
+                BufferType::Input, // &floats,
             )?;
         }
 
-        let mut constants = HashSet::new();
-        for node in graph
-            .node
-            .iter()
-            .filter(|node| node.op_type() == "Constant")
-        {
-            let output = &node.output[0];
-            let desc = log_graph.get_desc_name(output.as_str());
-
-            let Some(attr) = node.attribute.first() else {
-            bail!("attribute not provided for Constant {}", node.name());
-        };
-
-            let mut i = [0];
-            let mut f = [0.];
-            let data: &[u8] = match attr.name() {
-                "value" => attr.t.raw_data(),
-                "value_int" => {
-                    i[0] = attr.i();
-                    bytemuck::cast_slice(&i)
-                }
-                "value_ints" => bytemuck::cast_slice(&attr.ints),
-                "value_float" => {
-                    f[0] = attr.f();
-                    bytemuck::cast_slice(&f)
-                }
-                "value_floats" => bytemuck::cast_slice(&attr.floats),
-                _ => bail!("unsupported Constant type '{}'", attr.name()),
+        for op in &log_graph.ops {
+            let LogicalOpType::Constant { constant } = op.op_type() else {
+                continue;
             };
+            let output = op.outputs[0];
+            let desc = log_graph.get_desc(output);
 
-            constants.insert(output.as_str());
-            runner.add_node_with_init(
-                &log_graph
-                    .find_buffer_handle(output.as_str())
-                    .ok_or_else(|| anyhow!("could not find buffer for {}", output.as_str()))?,
-                desc.clone(),
-                data,
-            )?;
+            runner.add_node_with_init(&output, desc.clone(), constant)?;
         }
 
         for output in &log_graph.outputs {
             let desc = log_graph.get_desc(*output);
-            runner.add_node(output, desc.clone(), NodeType::Output)?;
+            runner.add_node(output, desc.clone(), BufferType::Output)?;
         }
 
-        let allow_not_exact_size_buffers = false; // This can decrease the required amount of memory
+        let force_readable = false;
+        let allow_not_exact_size_buffers = true; // This can decrease the required amount of memory
         runner
-            .allocate_tensors(&log_graph, false, allow_not_exact_size_buffers)
+            .allocate_tensors(&log_graph, force_readable, allow_not_exact_size_buffers)
             .with_context(|| anyhow!("when allocating nodes"))?;
 
         log::info!(

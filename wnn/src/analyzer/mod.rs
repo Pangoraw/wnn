@@ -70,7 +70,9 @@ pub(crate) enum LogicalOpType {
         ends: Vec<i64>,
         steps: Vec<i64>,
     },
-    Constant,
+    Constant {
+        constant: Vec<u8>,
+    },
     ConstantOfShape {
         constant: f32,
     },
@@ -130,7 +132,7 @@ impl std::fmt::Display for LogicalOpType {
             Softmax { .. } => "Softmax",
             Gather { .. } => "Gather",
             Slice { .. } => "Slice",
-            Constant => "Constant",
+            Constant { .. } => "Constant",
             ConstantOfShape { .. } => "ConstantOfShape",
             Concat { .. } => "Concat",
             Cast { .. } => "Cast",

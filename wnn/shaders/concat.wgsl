@@ -1,13 +1,14 @@
 // TODO: Make variadic and optimize...
 type T = {{ scalar }};
 
-@group(0) @binding(0)
-var<storage, read> input_left: array<T>;
+{% for input in range(end=i_length) %}
 
-@group(0) @binding(1)
-var<storage, read> input_right: array<T>;
+@group(0) @binding({{ input }})
+var<storage, read> input_{{ input }}: array<T>;
 
-@group(0) @binding(2)
+{% endfor %}
+
+@group(0) @binding({{ i_length }})
 var<storage, read_write> output: array<T>;
 
 @compute @workgroup_size({{ workgroup_x }})
@@ -36,12 +37,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         rest = rest % {{ o_strides[0][loop.index0] }}u;
     {% endfor %}
 
-        output[gx] = input_left[index];
-    } else {
+        output[gx] = input_0[index];
+    }
+    {% for axis_thresh in cum_inputs_size %}
+    {% set input_index = loop.index0 + 1 %}
+    {% if input_index == i_length - 1 %}
+    else {
+    {% else %}
+    else if axis_index < {{ axis_thresh + i_sizes[input_index][axis] }}u {
+    {% endif %}
 
     {% for dim in o_sizes[0] %}
         {% if loop.index0 == axis %}
-        let dim_index = rest / {{ o_strides[0][loop.index0] }}u - {{ i_sizes[0][axis] }}u;
+        let dim_index = rest / {{ o_strides[0][loop.index0] }}u - {{ axis_thresh }}u;
         {% else %}
         let dim_index = rest / {{ o_strides[0][loop.index0] }}u;
         {% endif %}
@@ -50,8 +58,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         rest = rest % {{ o_strides[0][loop.index0] }}u;
     {% endfor %}
 
-        output[gx] = input_right[index];
+        output[gx] = input_{{ input_index }}[index];
     }
+    {% endfor %}
 
     {% endfor %}
 }

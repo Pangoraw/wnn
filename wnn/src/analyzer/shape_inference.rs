@@ -225,7 +225,7 @@ impl<'a> ShapeInferer<'a> {
                     .collect::<anyhow::Result<Vec<&Shape>>>()?;
 
                 if input_shapes.iter().all(|shape| shape.ndims() == 1) {
-                    let new_constant = node
+                    if let Ok(constants) = node
                         .input
                         .iter()
                         .map(|input| {
@@ -233,12 +233,12 @@ impl<'a> ShapeInferer<'a> {
                                 .map(|s| s.to_owned())
                                 .ok_or_else(|| anyhow!("could not find constant for {input}"))
                         })
-                        .collect::<anyhow::Result<Vec<Vec<i64>>>>()?
-                        .iter()
-                        .flatten()
-                        .copied()
-                        .collect::<Vec<i64>>(); // Phew...
-                    self.constants.insert(node.output[0].as_str(), new_constant);
+                        .collect::<anyhow::Result<Vec<Vec<i64>>>>()
+                    {
+                        let new_constant =
+                            constants.iter().flatten().copied().collect::<Vec<i64>>(); // Phew...
+                        self.constants.insert(node.output[0].as_str(), new_constant);
+                    }
                 }
 
                 let axis = get_attr_int(node, "axis").ok_or_else(|| anyhow!("no axis provided"))?;
@@ -525,8 +525,30 @@ impl<'a> ShapeInferer<'a> {
                     }
                 }
 
+                let Some(attr) = node.attribute.first() else {
+                    bail!("attribute not provided for Constant {}", node.name());
+                };
+                let mut i = [0];
+                let mut f = [0.];
+                let data: &[u8] = match attr.name() {
+                    "value" => attr.t.raw_data(),
+                    "value_int" => {
+                        i[0] = attr.i();
+                        bytemuck::cast_slice(&i)
+                    }
+                    "value_ints" => bytemuck::cast_slice(&attr.ints),
+                    "value_float" => {
+                        f[0] = attr.f();
+                        bytemuck::cast_slice(&f)
+                    }
+                    "value_floats" => bytemuck::cast_slice(&attr.floats),
+                    _ => bail!("unsupported Constant type '{}'", attr.name()),
+                };
+
                 (
-                    LogicalOpType::Constant,
+                    LogicalOpType::Constant {
+                        constant: data.to_vec(),
+                    },
                     vec![shape.ok_or_else(|| anyhow!("could not infer shape of constant"))?],
                 )
             }
@@ -631,18 +653,27 @@ impl<'a> ShapeInferer<'a> {
                 let r = x.ndims() as i64;
 
                 let range: Vec<i64> = (0..x.ndims() as i64).collect();
-                let axes: Vec<i64> = self
-                    .find_constant(node.input[3].as_str())
+                let axes: Vec<i64> = node
+                    .input
+                    .get(3)
+                    .and_then(|input| self.find_constant(input.as_str()))
+                    .or_else(|| get_attr_ints(node, "axes"))
                     .unwrap_or(&range)
                     .iter()
                     .map(|ax| if *ax < 0 { *ax + r } else { *ax })
                     .collect();
 
-                let starts = self
-                    .find_constant(node.input[1].as_str())
+                let starts = node
+                    .input
+                    .get(1)
+                    .and_then(|input| self.find_constant(input.as_str()))
+                    .or_else(|| get_attr_ints(node, "starts"))
                     .ok_or_else(|| anyhow!("could not find starts {}", node.input[1]))?;
-                let ends = self
-                    .find_constant(node.input[2].as_str())
+                let ends = node
+                    .input
+                    .get(2)
+                    .and_then(|input| self.find_constant(input.as_str()))
+                    .or_else(|| get_attr_ints(node, "ends"))
                     .ok_or_else(|| anyhow!("could not find ends {}", node.input[2]))?;
 
                 let default_steps = std::iter::repeat(1).take(axes.len()).collect::<Vec<i64>>();
@@ -664,11 +695,6 @@ impl<'a> ShapeInferer<'a> {
                         let start = starts[i];
                         let end = ends[i];
                         let step = steps[i];
-
-                        match (axes[i], start, end, step) {
-                            (3, 0, 3, 1) => {}
-                            _ => bail!("unsupported slice, currently only supported is [:,:,:,:3]"),
-                        }
 
                         let elems_along_dim =
                             (end.clamp(0, x.concrete_size(dim)? as i64) - start) / step;
