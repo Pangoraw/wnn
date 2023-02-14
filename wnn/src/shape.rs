@@ -18,7 +18,7 @@ pub struct Shape {
 }
 
 impl Shape {
-    pub(crate) fn from(dims: &[i64]) -> Self {
+    pub fn from(dims: &[i64]) -> Self {
         Self {
             dims: dims
                 .iter()
@@ -88,7 +88,7 @@ impl Shape {
         }
     }
 
-    pub(crate) fn is_concrete(&self) -> bool {
+    pub fn is_concrete(&self) -> bool {
         self.dims
             .iter()
             .all(|d| matches!(d, Dimension::Concrete(_)))

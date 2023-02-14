@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use std::io::{Read, Write};
 
-use crate::shape::Shape;
-use crate::tensor::{DataType, TensorDesc};
+use wnn::shape::Shape;
+use wnn::tensor::{DataType, TensorDesc};
 
 const MAGIC_STRING: &[u8; 6] = b"\x93NUMPY";
 const SUPPORTED_VERSION: [u8; 2] = [

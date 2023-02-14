@@ -53,11 +53,11 @@ pub struct TensorDesc {
 }
 
 impl TensorDesc {
-    pub(crate) fn new(shape: Shape, dtype: DataType) -> Self {
+    pub fn new(shape: Shape, dtype: DataType) -> Self {
         Self { shape, dtype }
     }
 
-    pub(crate) fn size_of(&self) -> usize {
+    pub fn size_of(&self) -> usize {
         self.shape.numel().unwrap() * self.dtype.size_of()
     }
 }

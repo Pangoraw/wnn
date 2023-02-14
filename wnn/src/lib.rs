@@ -15,7 +15,6 @@ use crate::{
 mod analyzer;
 mod compiler;
 mod gpu;
-pub mod npy;
 pub mod onnx;
 pub mod shape;
 mod simplifier;

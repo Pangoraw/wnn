@@ -1,10 +1,63 @@
 use anyhow::Result;
 
-use crate::analyzer::{LogicalGraph, LogicalOp, LogicalOpType, PoolType, UnaryOpType};
+use crate::analyzer::{
+    get_desc, BufferHandle, LogicalGraph, LogicalOp, LogicalOpType, PoolType, UnaryOpType,
+};
+
+/// Apply different simplifications passes to the model.
+pub(crate) fn simplify(log_graph: &mut LogicalGraph) -> Result<()> {
+    remove_identities(log_graph);
+    fold_activations(log_graph)?;
+    Ok(())
+}
+
+fn replace_all_uses(log_graph: &mut LogicalGraph, mapping: (BufferHandle, BufferHandle)) {
+    let (new_value, old_value) = mapping;
+    for op in log_graph.ops.iter_mut() {
+        for input in op.inputs.iter_mut() {
+            if *input == old_value {
+                *input = new_value;
+            }
+        }
+    }
+}
+
+/// Remove "Identity" nodes from the graph and replace their outputs by its input in all nodes.
+fn remove_identities(log_graph: &mut LogicalGraph) {
+    let bufs = &log_graph.buffers;
+    let ops = &mut log_graph.ops;
+
+    let mut identity_mappings = Vec::new();
+
+    ops.retain(|op| {
+        if !matches!(op.op_type(), LogicalOpType::ReshapeOnly) {
+            return true;
+        }
+
+        if op.inputs.len() != 1 || op.outputs.len() != 1 {
+            return true;
+        }
+
+        let input = op.inputs[0];
+        let output = op.outputs[0];
+        if get_desc(bufs, input).shape != get_desc(bufs, output).shape {
+            return true;
+        }
+
+        identity_mappings.push((input, output));
+
+        false
+    });
+
+    // TODO: also clear entries in log_graph.buffers?
+    for mapping in identity_mappings {
+        replace_all_uses(log_graph, mapping);
+    }
+}
 
 /// Apply a simple folding of unary activations in compatible layers for layer which currently
 /// supports it (Conv, Gemm).
-pub(crate) fn simplify(log_graph: &mut LogicalGraph) -> Result<()> {
+fn fold_activations(log_graph: &mut LogicalGraph) -> Result<()> {
     let mut index = -1isize;
     while index < log_graph.ops.len() as isize - 1 {
         index += 1;
@@ -63,4 +116,52 @@ pub(crate) fn simplify(log_graph: &mut LogicalGraph) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::simplify;
+    use crate::{
+        analyzer::{builder::LogicalGraphBuilder, LogicalOpType},
+        shape::Shape,
+        tensor::TensorDesc,
+    };
+
+    #[test]
+    fn test_remove_identities() -> anyhow::Result<()> {
+        let mut builder = LogicalGraphBuilder::empty();
+        let desc = TensorDesc::new(Shape::from(&[10]), crate::tensor::DataType::F32);
+
+        let input = builder.add_input("input", desc.clone());
+        let inter = builder.add_buffer("inter", desc.clone());
+        let output = builder.add_output("output", desc);
+
+        builder.add_op(
+            "identity",
+            LogicalOpType::ReshapeOnly,
+            vec![input],
+            vec![inter],
+        );
+        builder.add_op("cos", LogicalOpType::Cos, vec![inter], vec![output]);
+
+        let mut graph = builder.build();
+        simplify(&mut graph)?;
+
+        if graph
+            .ops
+            .iter()
+            .any(|op| matches!(op.op_type(), LogicalOpType::ReshapeOnly))
+        {
+            anyhow::bail!(
+                "remove_identities pass did not work ({} ops)",
+                graph.ops.len()
+            );
+        }
+
+        if graph.ops[0].inputs[0] != input {
+            anyhow::bail!("failed to replace use of {inter} by {input}");
+        }
+
+        Ok(())
+    }
 }

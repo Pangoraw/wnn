@@ -2,7 +2,9 @@ use anyhow::{anyhow, Context};
 use protobuf::Message;
 use structopt::StructOpt;
 
-use wnn::{npy, onnx, tensor::DataType, CompiledModel, EvalOutput, InitMode};
+use wnn::{onnx, tensor::DataType, CompiledModel, EvalOutput, InitMode};
+
+mod npy;
 
 #[derive(StructOpt, Debug)]
 struct Args {
@@ -18,7 +20,7 @@ async fn compile_and_eval(
     graph: &onnx::GraphProto,
     inputs: Vec<&[u8]>,
 ) -> anyhow::Result<EvalOutput> {
-    let compiled_model = CompiledModel::new(&graph).await?;
+    let compiled_model = CompiledModel::new(graph).await?;
     compiled_model.eval_graph(&inputs).await
 }
 
@@ -99,12 +101,17 @@ fn main() -> anyhow::Result<()> {
         inputs.iter().map(|slice| slice.as_slice()).collect(),
     ))?;
 
+    let dump_folder = args
+        .dump_folder
+        .unwrap_or_else(|| std::path::PathBuf::from("activations"));
+
     for (name, tensor) in outputs.iter() {
-        let filename = format!("activations/{}.npy", name.replace("/", "."));
+        let filename = format!("{}.npy", name.replace('/', "."));
+        let filepath = dump_folder.join(&filename);
         let data = tensor.raw_data();
         let desc = &tensor.desc;
 
-        npy::save_to_file(&filename, data, desc)
+        npy::save_to_file(filepath.to_str().unwrap(), data, desc)
             .with_context(|| anyhow!("Saving to {filename}"))?;
     }
 

@@ -196,6 +196,10 @@ pub(crate) struct LogicalGraph {
     pub(crate) outputs: Vec<BufferHandle>,
 }
 
+pub(crate) fn get_desc(buffers: &[LogicalBuffer], handle: BufferHandle) -> &TensorDesc {
+    &buffers[handle].desc
+}
+
 impl LogicalGraph {
     pub(crate) fn new(
         graph: &onnx::GraphProto,
@@ -429,4 +433,66 @@ fn effective_inputs_(op_type: &LogicalOpType, default: usize) -> usize {
 
 pub(crate) fn effective_inputs(op: &LogicalOp) -> usize {
     effective_inputs_(&op.op_type, op.inputs.len())
+}
+
+#[cfg(test)]
+pub(crate) mod builder {
+    use super::*;
+
+    pub(crate) struct LogicalGraphBuilder {
+        log_graph: LogicalGraph,
+    }
+
+    impl LogicalGraphBuilder {
+        pub(crate) fn empty() -> Self {
+            Self {
+                log_graph: LogicalGraph {
+                    buffers: Vec::new(),
+                    ops: Vec::new(),
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                },
+            }
+        }
+
+        pub(crate) fn build(self) -> LogicalGraph {
+            self.log_graph
+        }
+
+        pub(crate) fn add_input(&mut self, name: &str, desc: TensorDesc) -> BufferHandle {
+            let handle = self.add_buffer(name, desc);
+            self.log_graph.inputs.push(handle);
+            handle
+        }
+
+        pub(crate) fn add_output(&mut self, name: &str, desc: TensorDesc) -> BufferHandle {
+            let handle = self.add_buffer(name, desc);
+            self.log_graph.outputs.push(handle);
+            handle
+        }
+
+        pub(crate) fn add_buffer(&mut self, name: &str, desc: TensorDesc) -> BufferHandle {
+            let handle = self.log_graph.buffers.len();
+            self.log_graph.buffers.push(LogicalBuffer {
+                name: Some(String::from(name)),
+                desc,
+            });
+            handle
+        }
+
+        pub(crate) fn add_op(
+            &mut self,
+            name: &str,
+            op_type: LogicalOpType,
+            inputs: Vec<BufferHandle>,
+            outputs: Vec<BufferHandle>,
+        ) {
+            self.log_graph.ops.push(LogicalOp {
+                name: Some(String::from(name)),
+                inputs,
+                outputs,
+                op_type,
+            })
+        }
+    }
 }
