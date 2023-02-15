@@ -1,58 +1,64 @@
 // This file is very much inspired/copied from webonnx/wonnx
 
-use std::collections::HashMap;
-
 use anyhow::{anyhow, bail};
-use lazy_static::lazy_static;
 
 use crate::analyzer::{BufferHandle, LogicalGraph, LogicalOp, LogicalOpType, PoolType};
 
-lazy_static! {
-    static ref SHADER_FILES: HashMap<&'static str, &'static str> = HashMap::from_iter([
-        ("matmul", include_str!("../shaders/matmul.wgsl")),
-        ("slice", include_str!("../shaders/slice.wgsl")),
-        ("activation", include_str!("../shaders/activation.wgsl")),
-        ("conv", include_str!("../shaders/conv.wgsl")),
-        ("concat", include_str!("../shaders/concat.wgsl")),
-        ("maxpool", include_str!("../shaders/maxpool.wgsl")),
-        ("transpose", include_str!("../shaders/transpose.wgsl")),
-        ("broadcast", include_str!("../shaders/broadcast.wgsl")),
-        ("resize", include_str!("../shaders/resize.wgsl")),
-        ("softmax", include_str!("../shaders/softmax.wgsl")),
-        ("where", include_str!("../shaders/where.wgsl")),
-        (
-            "constantofshape",
-            include_str!("../shaders/constantofshape.wgsl")
-        ),
-        (
-            "globalaveragepool",
-            include_str!("../shaders/globalaveragepool.wgsl")
-        ),
-        (
-            "batchnormalization",
-            include_str!("../shaders/batchnormalization.wgsl")
-        ),
-        (
-            "instancenormalization",
-            include_str!("../shaders/instancenormalization.wgsl")
-        ),
-    ]);
+#[derive(Debug, Clone, Copy)]
+#[repr(usize)]
+enum ShaderFile {
+    Matmul,
+    Slice,
+    Activation,
+    Conv,
+    Concat,
+    Maxpool,
+    Transpose,
+    Broadcast,
+    Resize,
+    Softmax,
+    Where,
+    ConstantOfShape,
+    GlobalaveragePool,
+    BatchNormalization,
+    InstanceNormalization,
+
+    Last,
 }
+
+const SHADER_FILES: &[&str] = &[
+    include_str!("../shaders/matmul.wgsl"),
+    include_str!("../shaders/slice.wgsl"),
+    include_str!("../shaders/activation.wgsl"),
+    include_str!("../shaders/conv.wgsl"),
+    include_str!("../shaders/concat.wgsl"),
+    include_str!("../shaders/maxpool.wgsl"),
+    include_str!("../shaders/transpose.wgsl"),
+    include_str!("../shaders/broadcast.wgsl"),
+    include_str!("../shaders/resize.wgsl"),
+    include_str!("../shaders/softmax.wgsl"),
+    include_str!("../shaders/where.wgsl"),
+    include_str!("../shaders/constantofshape.wgsl"),
+    include_str!("../shaders/globalaveragepool.wgsl"),
+    include_str!("../shaders/batchnormalization.wgsl"),
+    include_str!("../shaders/instancenormalization.wgsl"),
+];
 
 /// We should be able to convert to wgsl String
 /// and get the workgroup dispatch informations
 /// from a compiled shader invocation.
 pub(crate) struct ShaderInvocation {
-    file_name: &'static str,
+    file_name: ShaderFile,
     context: tera::Context,
     dispatch: (u32, u32, u32),
 }
 
 impl ShaderInvocation {
     pub(crate) fn to_wgsl(&self, enable_f16: bool) -> anyhow::Result<String> {
+        debug_assert!(SHADER_FILES.len() == ShaderFile::Last as usize);
         let template = SHADER_FILES
-            .get(&self.file_name)
-            .ok_or_else(|| anyhow!("invalid shader template '{}'", self.file_name))?;
+            .get(self.file_name as usize)
+            .ok_or_else(|| anyhow!("invalid shader template '{:?}'", self.file_name))?;
         let wgsl = tera::Tera::one_off(template, &self.context, false)?;
         if enable_f16 {
             Ok(format!("enable f16;\n\n{wgsl}"))
@@ -210,7 +216,7 @@ pub(crate) fn compile_node(
             maybe_add_activation(&mut context, activation);
 
             ShaderInvocation {
-                file_name: "matmul",
+                file_name: ShaderFile::Matmul,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -226,7 +232,7 @@ pub(crate) fn compile_node(
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             ShaderInvocation {
-                file_name: "batchnormalization",
+                file_name: ShaderFile::BatchNormalization,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -236,7 +242,7 @@ pub(crate) fn compile_node(
             context.insert("epsilon", &epsilon);
 
             ShaderInvocation {
-                file_name: "instancenormalization",
+                file_name: ShaderFile::InstanceNormalization,
                 context,
                 dispatch: (
                     input_shape.concrete_size(0)? as _,
@@ -272,7 +278,7 @@ pub(crate) fn compile_node(
             context.insert("xy_scales", &xy_scales);
 
             ShaderInvocation {
-                file_name: "resize",
+                file_name: ShaderFile::Resize,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -292,7 +298,7 @@ pub(crate) fn compile_node(
             );
 
             ShaderInvocation {
-                file_name: "softmax",
+                file_name: ShaderFile::Softmax,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -318,7 +324,7 @@ pub(crate) fn compile_node(
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs as _);
 
             ShaderInvocation {
-                file_name: "slice",
+                file_name: ShaderFile::Slice,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -339,7 +345,7 @@ pub(crate) fn compile_node(
             context.insert("scalar", scalar);
 
             ShaderInvocation {
-                file_name: "constantofshape",
+                file_name: ShaderFile::ConstantOfShape,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -384,7 +390,7 @@ pub(crate) fn compile_node(
             context.insert("cum_inputs_size", &vec);
 
             ShaderInvocation {
-                file_name: "concat",
+                file_name: ShaderFile::Concat,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -402,7 +408,7 @@ pub(crate) fn compile_node(
             context.insert("activation", &format!("{}(x)", target_type));
 
             ShaderInvocation {
-                file_name: "activation",
+                file_name: ShaderFile::Activation,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -439,7 +445,7 @@ pub(crate) fn compile_node(
             }
 
             ShaderInvocation {
-                file_name: "activation",
+                file_name: ShaderFile::Activation,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -469,7 +475,7 @@ pub(crate) fn compile_node(
             );
 
             ShaderInvocation {
-                file_name: "transpose",
+                file_name: ShaderFile::Transpose,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -484,7 +490,7 @@ pub(crate) fn compile_node(
             let dispatch_x = add_invocs_to_context(&mut context, n_invocs);
 
             ShaderInvocation {
-                file_name: "where",
+                file_name: ShaderFile::Where,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -554,7 +560,7 @@ pub(crate) fn compile_node(
             }
 
             ShaderInvocation {
-                file_name: "broadcast",
+                file_name: ShaderFile::Broadcast,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -572,7 +578,7 @@ pub(crate) fn compile_node(
             );
 
             ShaderInvocation {
-                file_name: "globalaveragepool",
+                file_name: ShaderFile::GlobalaveragePool,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -600,7 +606,7 @@ pub(crate) fn compile_node(
             maybe_add_activation(&mut context, activation);
 
             ShaderInvocation {
-                file_name: "conv",
+                file_name: ShaderFile::Conv,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }
@@ -631,7 +637,7 @@ pub(crate) fn compile_node(
             );
 
             ShaderInvocation {
-                file_name: "maxpool",
+                file_name: ShaderFile::Maxpool,
                 context,
                 dispatch: (dispatch_x as _, 1, 1),
             }

@@ -762,7 +762,7 @@ impl<'a> ShapeInferer<'a> {
 
                 match keepdims {
                     1 => {}
-                    0 => bail!("keepdims = 1 is only supported"), 
+                    0 => bail!("keepdims = 1 is only supported"),
                     other => bail!("invalid '{other}' value for keepdims"),
                 }
 
