@@ -38,7 +38,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         {% endif %};
 
         let right_idx = {% if trans_b == 0 %}
-            x + k * {{ i_sizes[1][1] }}u
+            i + k * {{ i_sizes[1][1] }}u
         {% else %}
             k + i * {{ i_sizes[1][1] }}u
         {% endif %};

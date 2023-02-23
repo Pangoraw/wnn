@@ -165,6 +165,15 @@ impl CompiledModel {
         }
 
         for (input, input_handle) in inputs.iter().zip(&self.log_graph.inputs) {
+            let expected_size = self.log_graph.get_desc(*input_handle).size_of();
+            if expected_size != input.len() {
+                bail!(
+                    "invalid size {} provided for input '{}' (expected {})",
+                    input.len(),
+                    self.log_graph.find_name(input_handle),
+                    expected_size
+                );
+            }
             self.runner.write_node(*input_handle, input).await?;
         }
 

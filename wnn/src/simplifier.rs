@@ -122,27 +122,26 @@ fn fold_activations(log_graph: &mut LogicalGraph) -> Result<()> {
 mod tests {
     use super::simplify;
     use crate::{
-        analyzer::{builder::LogicalGraphBuilder, LogicalOpType},
-        shape::Shape,
+        analyzer::{builder::LogicalGraphBuilder, LogicalOpType, UnaryOpType},
         tensor::TensorDesc,
     };
 
     #[test]
     fn test_remove_identities() -> anyhow::Result<()> {
         let mut builder = LogicalGraphBuilder::empty();
-        let desc = TensorDesc::new(Shape::from(&[10]), crate::tensor::DataType::F32);
+        let desc = TensorDesc::static_f32(&[10]);
 
         let input = builder.add_input("input", desc.clone());
         let inter = builder.add_buffer("inter", desc.clone());
         let output = builder.add_output("output", desc);
 
         builder.add_op(
-            "identity",
+            "Identity",
             LogicalOpType::ReshapeOnly,
             vec![input],
             vec![inter],
         );
-        builder.add_op("cos", LogicalOpType::Cos, vec![inter], vec![output]);
+        builder.add_op("Cos", LogicalOpType::Cos, vec![inter], vec![output]);
 
         let mut graph = builder.build();
         simplify(&mut graph)?;
@@ -161,6 +160,69 @@ mod tests {
         if graph.ops[0].inputs[0] != input {
             anyhow::bail!("failed to replace use of {inter} by {input}");
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fuse_activations() -> anyhow::Result<()> {
+        let mut builder = LogicalGraphBuilder::empty();
+
+        let desc = TensorDesc::static_f32(&[10, 5]);
+        let weights_desc = TensorDesc::static_f32(&[5, 3]);
+        let biases_desc = TensorDesc::static_f32(&[3]);
+        let outdesc = TensorDesc::static_f32(&[10, 3]);
+
+        let input = builder.add_input("input", desc);
+        let weights = builder.add_input("weights", weights_desc);
+        let biases = builder.add_input("biases", biases_desc);
+        let inter = builder.add_buffer("inter", outdesc.clone());
+        let output = builder.add_output("output", outdesc);
+
+        builder.add_op(
+            "Gemm",
+            LogicalOpType::Gemm {
+                trans_a: false,
+                trans_b: false,
+                alpha: 1.,
+                beta: 1.,
+                activation: None,
+            },
+            vec![input, weights, biases],
+            vec![inter],
+        );
+        builder.add_op("Relu", LogicalOpType::Relu, vec![inter], vec![output]);
+
+        let mut graph = builder.build();
+        if graph.ops.len() != 2 {
+            anyhow::bail!("the graph is invalid");
+        }
+
+        simplify(&mut graph)?;
+
+        if graph.ops.len() != 1 {
+            anyhow::bail!("failed to fuse Gemm and Relu");
+        }
+
+        match graph.ops[0].op_type() {
+            LogicalOpType::Gemm {
+                trans_a: false,
+                trans_b: false,
+                activation: Some(UnaryOpType::Relu),
+                alpha,
+                beta,
+            } if *alpha == 1f32 && *beta == 1f32 => {}
+            LogicalOpType::Gemm {
+                trans_a: false,
+                trans_b: false,
+                activation,
+                alpha,
+                beta,
+            } if *alpha == 1f32 && *beta == 1f32 => {
+                anyhow::bail!("invalid activation {:?}", activation)
+            }
+            _ => anyhow::bail!("invalid op_type"),
+        };
 
         Ok(())
     }

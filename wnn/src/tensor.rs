@@ -57,6 +57,13 @@ impl TensorDesc {
         Self { shape, dtype }
     }
 
+    pub(crate) fn static_f32(dims: &[i64]) -> Self {
+        Self {
+            shape: Shape::from(dims),
+            dtype: DataType::F32,
+        }
+    }
+
     pub fn size_of(&self) -> usize {
         self.shape.numel().unwrap() * self.dtype.size_of()
     }
