@@ -14,13 +14,17 @@ struct Args {
 
     #[structopt(long, short, default_value = "ones")]
     init: String,
+
+    #[structopt(long, short, help = "seq:10,N:10")]
+    dim_mappings: Option<String>,
 }
 
 async fn compile_and_eval(
     graph: &onnx::GraphProto,
     inputs: Vec<&[u8]>,
+    dim_mappings: Option<std::collections::HashMap<&str, i64>>,
 ) -> anyhow::Result<EvalOutput> {
-    let compiled_model = CompiledModel::new(graph).await?;
+    let compiled_model = CompiledModel::new(graph, dim_mappings).await?;
     compiled_model.eval_graph(&inputs).await
 }
 
@@ -42,6 +46,11 @@ fn main() -> anyhow::Result<()> {
         other => InitMode::File(other),
     };
 
+    let dim_mappings: Option<std::collections::HashMap<&str, i64>> = args
+        .dim_mappings
+        .as_ref()
+        .map(|map| wnn::parse_mappings(map));
+
     let inputs = model
         .graph
         .input
@@ -54,23 +63,44 @@ fn main() -> anyhow::Result<()> {
                 .shape
                 .dim
                 .iter()
-                .map(|dim| {
-                    let Some(onnx::tensor_shape_proto::dimension::Value::DimValue(val)) = dim.value else {
-                        panic!("dimension is not concrete for input");
-                    };
-                    val
+                .map(|dim| match (&dim.value, &dim_mappings) {
+                    (Some(onnx::tensor_shape_proto::dimension::Value::DimValue(val)), _) => *val,
+                    (
+                        Some(onnx::tensor_shape_proto::dimension::Value::DimParam(dim)),
+                        Some(dim_mappings),
+                    ) => {
+                        let Some(val) = dim_mappings.get(dim.as_str()) else {
+                            panic!("dim {dim} is not present in dimension mappings.");
+                        };
+                        *val
+                    }
+                    (Some(onnx::tensor_shape_proto::dimension::Value::DimParam(dim)), None) => {
+                        panic!(
+                            "dim {dim} is not concrete and no dimension mappings were provided."
+                        );
+                    }
+                    _ => unreachable!(),
                 })
-                .reduce(|a, b| a * b).unwrap();
+                .reduce(|a, b| a * b)
+                .unwrap();
 
             let bytes: Vec<u8> = match (&init_mode, dtype) {
-                (InitMode::Ones, DataType::F32) => {
-                    bytemuck::cast_slice(&std::iter::repeat(1.0).take(numel as _).collect::<Vec<f32>>())
-                        .to_vec()
-                }
-                (InitMode::Ones, DataType::F64) => {
-                    bytemuck::cast_slice(&std::iter::repeat(1.0).take(numel as _).collect::<Vec<f64>>())
-                        .to_vec()
-                }
+                (InitMode::Ones, DataType::F32) => bytemuck::cast_slice(
+                    &std::iter::repeat(1.0)
+                        .take(numel as _)
+                        .collect::<Vec<f32>>(),
+                )
+                .to_vec(),
+                (InitMode::Ones, DataType::F64) => bytemuck::cast_slice(
+                    &std::iter::repeat(1.0)
+                        .take(numel as _)
+                        .collect::<Vec<f64>>(),
+                )
+                .to_vec(),
+                (InitMode::Ones, DataType::I64) => bytemuck::cast_slice(
+                    &std::iter::repeat(1).take(numel as _).collect::<Vec<i64>>(),
+                )
+                .to_vec(),
                 (InitMode::Range, DataType::F32) => bytemuck::cast_slice(
                     &(0..numel)
                         .map(|i| i as f32)
@@ -91,14 +121,18 @@ fn main() -> anyhow::Result<()> {
                         .with_context(|| anyhow!("when open file {}", path))?;
                     data
                 }
-                (init, dtype) => anyhow::bail!("invalid initialization '{:?}' for type {dtype}", init),
+                (init, dtype) => {
+                    anyhow::bail!("invalid initialization '{:?}' for type {dtype}", init)
+                }
             };
             Ok(bytes)
-        }).collect::<anyhow::Result<Vec<Vec<u8>>>>()?;
+        })
+        .collect::<anyhow::Result<Vec<Vec<u8>>>>()?;
 
     let outputs = pollster::block_on(compile_and_eval(
         &model.graph,
         inputs.iter().map(|slice| slice.as_slice()).collect(),
+        dim_mappings,
     ))?;
 
     let dump_folder = args

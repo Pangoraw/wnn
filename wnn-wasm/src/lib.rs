@@ -21,7 +21,7 @@ pub struct Model {
 
 pub async fn parse_model_(bytes: &[u8]) -> anyhow::Result<Model> {
     let model = onnx::ModelProto::parse_from_bytes(bytes)?;
-    let compiled_model = CompiledModel::new(&model.graph).await?;
+    let compiled_model = CompiledModel::new(&model.graph, None).await?;
     let onnx_model = Model {
         model: compiled_model,
     };

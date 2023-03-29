@@ -17,7 +17,7 @@ fn test_resnet() -> anyhow::Result<()> {
 
     let model = onnx::ModelProto::parse_from_reader(&mut onnx_file)?;
     let graph = &model.graph;
-    let model = pollster::block_on(CompiledModel::new(graph))?;
+    let model = pollster::block_on(CompiledModel::new(graph, None))?;
 
     let inputs = graph
         .input

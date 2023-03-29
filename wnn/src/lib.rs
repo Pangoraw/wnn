@@ -38,17 +38,30 @@ pub struct CompiledModel {
     ops: Vec<Op>,
 }
 
-impl CompiledModel {
-    pub async fn new(graph: &onnx::GraphProto) -> anyhow::Result<CompiledModel> {
-        // Concretize common dimensions, TODO: pass as arg
-        let dim_mappings = HashMap::from_iter([
-            ("N", shape::Dimension::Concrete(1)),
-            ("batch", shape::Dimension::Concrete(1)),
-            ("channels", shape::Dimension::Concrete(4)),
-            ("height", shape::Dimension::Concrete(64)),
-            ("width", shape::Dimension::Concrete(64)),
-        ]);
+pub type ConcreteDimMappings<'a> = std::collections::HashMap<&'a str, i64>;
 
+    pub fn parse_mappings(s: &str) -> std::collections::HashMap<&str, i64> {
+        std::collections::HashMap::from_iter(s.split(',').map(|dim| {
+            let mut it = dim.trim().split(':');
+            let name = it.next().unwrap();
+            let value = it.next().unwrap();
+            (name, str::parse(value).unwrap())
+        }))
+    }
+
+impl CompiledModel {
+    pub async fn new(
+        graph: &onnx::GraphProto,
+        dim_mappings: Option<ConcreteDimMappings<'_>>,
+    ) -> anyhow::Result<CompiledModel> {
+        let dim_mappings = match dim_mappings.as_ref() {
+            Some(mapping) => std::collections::HashMap::from_iter(
+                mapping
+                    .iter()
+                    .map(|(k, v)| (k.as_ref(), shape::Dimension::Concrete(*v as usize))),
+            ),
+            None => std::collections::HashMap::new(),
+        };
         let log_graph = {
             let mut log_graph = analyzer::LogicalGraph::new(graph, &dim_mappings)?;
             simplifier::simplify(&mut log_graph)?;
