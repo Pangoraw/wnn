@@ -167,6 +167,8 @@ impl Op {
 }
 
 pub(crate) type TensorHandle = usize;
+const NO_TENSOR_HANDLE: TensorHandle = TensorHandle::MAX;
+
 pub(crate) struct Runner {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -174,7 +176,11 @@ pub(crate) struct Runner {
     inputs: HashMap<TensorHandle, wgpu::Buffer>,
     outputs: HashMap<TensorHandle, wgpu::Buffer>,
     slots: Vec<TensorStorage>,
-    which_slots: HashMap<BufferHandle, TensorHandle>,
+
+    // A map BufferHandle -> TensorHandle,
+    // using semaphore NO_TENSOR_HANDLE for no
+    // Buffer.
+    which_slots: Vec<TensorHandle>,
 }
 
 const MAX_ALLOC_LIMIT: u64 = 7_500_000_000;
@@ -224,7 +230,7 @@ impl Runner {
             inputs: HashMap::new(),
             outputs: HashMap::new(),
             slots: Vec::new(),
-            which_slots: HashMap::new(),
+            which_slots: Vec::new(),
         })
     }
 
@@ -235,6 +241,10 @@ impl Runner {
                 .values()
                 .map(|buffer| buffer.size())
                 .sum::<u64>()
+    }
+
+    fn has_buffer(&self, buf: &BufferHandle) -> bool {
+        !matches!(self.which_slots.get(*buf), None | Some(&NO_TENSOR_HANDLE))
     }
 
     /// Performs tensor allocation by reusing unused allocations.
@@ -296,7 +306,7 @@ impl Runner {
                 })
             {
                 // Input already has a buffer, skip it..
-                if self.which_slots.contains_key(input) {
+                if self.has_buffer(input) {
                     continue 'inputs;
                 }
 
@@ -326,7 +336,7 @@ impl Runner {
 
                     // 1.1) Reserve free slot if available
                     slot.free = false;
-                    self.which_slots.insert(*input, slot_index);
+                    self.register_slot(*input, slot_index);
                 } else {
                     let desc = log_graph.get_desc(*input);
 
@@ -367,14 +377,14 @@ impl Runner {
                 Some(s) => s,
                 None => output,
             }) {
-                if !self.which_slots.contains_key(output) {
+                if !self.has_buffer(output) {
                     log::warn!("found output which was not used before (%{output})");
                     continue 'outputs;
                 }
 
                 debug_assert!(self.slots.len() == slots_availability.len());
 
-                let slot_index = self.which_slots[output];
+                let slot_index = self.which_slots[*output];
 
                 // If the slot was pre-allocated or we want every activation to have its own buffer,
                 // then we don't free it.
@@ -384,7 +394,7 @@ impl Runner {
 
                 log::debug!(
                     "freeing slot {} for output {output}",
-                    self.which_slots[output]
+                    self.which_slots[*output]
                 );
 
                 // 2) When output appears mark slot as free
@@ -394,10 +404,10 @@ impl Runner {
         }
 
         for (output, input) in aliases {
-            if self.which_slots.contains_key(&output) {
+            if self.has_buffer(&output) {
                 continue;
             }
-            self.which_slots.insert(output, self.which_slots[&input]);
+            self.register_slot(output, self.which_slots[input]);
         }
 
         if &std::env::var_os("DUMP_ALLOCS")
@@ -415,7 +425,7 @@ impl Runner {
                     print!(
                         "%{}(#{})",
                         output,
-                        match self.which_slots.get(output) {
+                        match self.which_slots.get(*output) {
                             Some(s) => *s as isize,
                             None => -1,
                         }
@@ -430,7 +440,7 @@ impl Runner {
                     print!(
                         "%{}(#{})",
                         input,
-                        match self.which_slots.get(input) {
+                        match self.which_slots.get(*input) {
                             Some(s) => *s as isize,
                             None => -1,
                         }
@@ -448,7 +458,7 @@ impl Runner {
     }
 
     pub(crate) fn get_storage(&self, handle: &BufferHandle) -> anyhow::Result<&TensorStorage> {
-        match self.which_slots.get(handle) {
+        match self.which_slots.get(*handle) {
             Some(i) if *i < self.slots.len() => Ok(&self.slots[*i]),
             _ => Err(anyhow!("failed to find tensor for %{handle}")),
         }
@@ -462,11 +472,14 @@ impl Runner {
     ) -> anyhow::Result<()> {
         let buf_size = desc.size_of();
         let storage = TensorStorage::new(&self.device, desc, None, node_type);
-        if self.which_slots.contains_key(handle) {
+        if self.has_buffer(handle) {
             anyhow::bail!("node {} was already inserted in runner", handle);
         }
 
         let tensor_idx = self.slots.len();
+        self.slots.push(storage);
+        self.register_slot(*handle, tensor_idx);
+
         match node_type {
             BufferType::Output => {
                 let read_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -489,8 +502,6 @@ impl Runner {
             BufferType::Intermediary => {}
         }
 
-        self.slots.push(storage);
-        self.which_slots.insert(*handle, tensor_idx);
         Ok(())
     }
 
@@ -520,6 +531,13 @@ impl Runner {
         self.add_node_with_init(handle, desc, raw_data)
     }
 
+    fn register_slot(&mut self, node: BufferHandle, handle: TensorHandle) {
+        if node + 1 > self.which_slots.len() {
+            self.which_slots.resize(node + 1, NO_TENSOR_HANDLE);
+        }
+        self.which_slots[node] = handle;
+    }
+
     pub(crate) fn add_node_with_init(
         &mut self,
         name: &BufferHandle,
@@ -536,26 +554,27 @@ impl Runner {
             );
         }
 
-        if self.which_slots.contains_key(name) {
-            log::warn!("tensor {} was already inserted in runner", name);
-            return Ok(());
-            // bail!("tensor {} was already inserted in runner", name);
+        if self.has_buffer(name) {
+            bail!("tensor {} was already inserted in runner", name);
         }
+
         let storage = TensorStorage::new_with_init(&self.device, raw_data, desc, None);
-        let tensor_idx = self.which_slots.len();
-        self.which_slots.insert(*name, tensor_idx);
+
+        let tensor_idx = self.slots.len();
+        self.register_slot(*name, tensor_idx);
         self.slots.push(storage);
+
         Ok(())
     }
 
     pub(crate) async fn read_bytes(&self, handle: &BufferHandle) -> anyhow::Result<Vec<u8>> {
-        if !self.outputs.contains_key(&self.which_slots[handle]) {
+        if !self.outputs.contains_key(&self.which_slots[*handle]) {
             bail!(
                 "output buffer not found for %{handle}(#{})",
-                self.which_slots[handle]
+                self.which_slots[*handle]
             );
         }
-        let read_buf = &self.outputs[&self.which_slots[handle]];
+        let read_buf = &self.outputs[&self.which_slots[*handle]];
 
         let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
         let slice = read_buf.slice(..);
@@ -622,7 +641,7 @@ impl Runner {
         input_handle: BufferHandle,
         input: &[u8],
     ) -> anyhow::Result<()> {
-        let tensor_handle = self.which_slots[&input_handle];
+        let tensor_handle = self.which_slots[input_handle];
         let src_buf = &self.inputs[&tensor_handle];
 
         let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
