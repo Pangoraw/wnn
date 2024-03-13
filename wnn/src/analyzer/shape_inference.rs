@@ -207,7 +207,7 @@ impl<'a> ShapeInferer<'a> {
                 let input_shape = &self.shapes[node.input[0].as_str()];
                 let mut output_shape = Shape::empty();
                 output_shape.append_dim(input_shape.size(0).clone());
-                output_shape.append_dim(crate::shape::Dimension::Rest);
+                output_shape.append_dim(crate::shape::Dimension::Rest.into());
                 (
                     LogicalOpType::ReshapeOnly,
                     vec![output_shape.map_and_rest(input_shape)],
@@ -396,8 +396,8 @@ impl<'a> ShapeInferer<'a> {
                 let mut out_shape = Shape::empty();
                 out_shape.append_dim(x.size(0).clone()); // B
                 out_shape.append_dim(out_channels); // C
-                out_shape.append_dim(crate::shape::Dimension::Concrete(h_out as usize)); // H
-                out_shape.append_dim(crate::shape::Dimension::Concrete(w_out as usize)); // W
+                out_shape.append_dim(crate::shape::Dimension::Concrete(h_out as usize).into()); // H
+                out_shape.append_dim(crate::shape::Dimension::Concrete(w_out as usize).into()); // W
 
                 (
                     LogicalOpType::Pool {
@@ -698,7 +698,9 @@ impl<'a> ShapeInferer<'a> {
 
                         let elems_along_dim =
                             (end.clamp(0, x.concrete_size(dim)? as i64) - start) / step;
-                        out.append_dim(crate::shape::Dimension::Concrete(elems_along_dim as usize));
+                        out.append_dim(
+                            crate::shape::Dimension::Concrete(elems_along_dim as usize).into(),
+                        );
                     } else {
                         out.append_dim(x.size(dim).clone());
                     }

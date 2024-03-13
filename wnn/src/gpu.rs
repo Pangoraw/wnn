@@ -100,6 +100,10 @@ impl Op {
             .to_wgsl(enable_f16)
             .with_context(|| anyhow!("expanding shader for {}", logical_op.name()))?;
 
+        // std::fs::write(
+        //     &format!("kernels/{}.wgsl", logical_op.name()),
+        //     shader_source.as_bytes(),
+        // )?;
         // println!("{shader_source}");
 
         let kernel = runner

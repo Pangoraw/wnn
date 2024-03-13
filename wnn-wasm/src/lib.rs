@@ -47,7 +47,8 @@ pub async fn eval_graph_(model: &Model, inputs: &[&[u8]]) -> anyhow::Result<Vec<
     let CPUTensor {
         desc: _,
         data: CPUTensorData::F32(v),
-    } = first else {
+    } = first
+    else {
         anyhow::bail!("invalid output format");
     };
 

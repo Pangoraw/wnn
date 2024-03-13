@@ -35,16 +35,24 @@ fn test_resnet() -> anyhow::Result<()> {
                 .dim
                 .iter()
                 .map(|dim| {
-                    let Some(onnx::tensor_shape_proto::dimension::Value::DimValue(val)) = dim.value else {
+                    let Some(onnx::tensor_shape_proto::dimension::Value::DimValue(val)) = dim.value
+                    else {
                         panic!("dimension is not concrete for input");
                     };
                     val
                 })
-                .reduce(|a, b| a * b).unwrap();
+                .reduce(|a, b| a * b)
+                .unwrap();
 
-            let bytes: Vec<u8> = bytemuck::cast_slice(&std::iter::repeat(1.0).take(numel as _).collect::<Vec<f32>>()).to_vec();
+            let bytes: Vec<u8> = bytemuck::cast_slice(
+                &std::iter::repeat(1.0)
+                    .take(numel as _)
+                    .collect::<Vec<f32>>(),
+            )
+            .to_vec();
             Ok(bytes)
-        }).collect::<anyhow::Result<Vec<Vec<u8>>>>()?;
+        })
+        .collect::<anyhow::Result<Vec<Vec<u8>>>>()?;
 
     let inputs: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
     let output = pollster::block_on(model.eval_graph(&inputs))?;

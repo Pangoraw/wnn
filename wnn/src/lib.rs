@@ -40,14 +40,14 @@ pub struct CompiledModel {
 
 pub type ConcreteDimMappings<'a> = std::collections::HashMap<&'a str, i64>;
 
-    pub fn parse_mappings(s: &str) -> std::collections::HashMap<&str, i64> {
-        std::collections::HashMap::from_iter(s.split(',').map(|dim| {
-            let mut it = dim.trim().split(':');
-            let name = it.next().unwrap();
-            let value = it.next().unwrap();
-            (name, str::parse(value).unwrap())
-        }))
-    }
+pub fn parse_mappings(s: &str) -> std::collections::HashMap<&str, i64> {
+    std::collections::HashMap::from_iter(s.split(',').map(|dim| {
+        let mut it = dim.trim().split(':');
+        let name = it.next().unwrap();
+        let value = it.next().unwrap();
+        (name, str::parse(value).unwrap())
+    }))
+}
 
 impl CompiledModel {
     pub async fn new(
